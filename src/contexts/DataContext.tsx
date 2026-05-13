@@ -1,6 +1,18 @@
 import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
-import { AppData, Immobile, Proprietario, Inquilino, Contratto, Pagamento, Manutenzione, Lead } from '@/lib/types';
+import {
+  AppData, Immobile, Proprietario, Inquilino, Contratto, Pagamento,
+  Manutenzione, Lead, SpesaFissa, StatoPagamento, TipologiaManutenzione, PeriodicitaManutenzione,
+} from '@/lib/types';
 import { loadData, saveData, generateId } from '@/lib/dataStore';
+
+const MANUTENZIONI_AUTO: Array<{ tipologia: TipologiaManutenzione; descrizione: string; periodicita: PeriodicitaManutenzione; mesi: number }> = [
+  { tipologia: 'caldaia', descrizione: 'Revisione annuale caldaia', periodicita: 'annuale', mesi: 12 },
+  { tipologia: 'filtri', descrizione: 'Sostituzione filtri aria/acqua', periodicita: 'annuale', mesi: 12 },
+  { tipologia: 'caditoie', descrizione: 'Pulizia caditoie e scarichi', periodicita: 'annuale', mesi: 12 },
+  { tipologia: 'serramenti', descrizione: 'Controllo serramenti e infissi', periodicita: 'triennale', mesi: 36 },
+  { tipologia: 'siliconature', descrizione: 'Controllo e rifacimento siliconature', periodicita: 'triennale', mesi: 36 },
+  { tipologia: 'bascula', descrizione: 'Pulizia e manutenzione bascula/cancello', periodicita: 'triennale', mesi: 36 },
+];
 
 interface DataContextType {
   data: AppData;
@@ -18,7 +30,7 @@ interface DataContextType {
   updateInquilino: (id: string, item: Partial<Inquilino>) => void;
   deleteInquilino: (id: string) => void;
   // Contratti
-  addContratto: (item: Omit<Contratto, 'id' | 'createdAt'>) => void;
+  addContratto: (item: Omit<Contratto, 'id' | 'createdAt'>) => Contratto;
   updateContratto: (id: string, item: Partial<Contratto>) => void;
   deleteContratto: (id: string) => void;
   // Pagamenti
@@ -29,12 +41,23 @@ interface DataContextType {
   addManutenzione: (item: Omit<Manutenzione, 'id' | 'createdAt'>) => void;
   updateManutenzione: (id: string, item: Partial<Manutenzione>) => void;
   deleteManutenzione: (id: string) => void;
+  // SpeseFisse
+  addSpesaFissa: (item: Omit<SpesaFissa, 'id' | 'createdAt'>) => void;
+  updateSpesaFissa: (id: string, item: Partial<SpesaFissa>) => void;
+  deleteSpesaFissa: (id: string) => void;
   // Lead
   addLead: (item: Omit<Lead, 'id' | 'createdAt'>) => void;
   deleteLead: (id: string) => void;
+  // Helpers
+  generaPagamentiContratto: (contrattoId: string) => number;
+  generaManutenzioniAutomatiche: (immobileId?: string) => number;
 }
 
 const DataContext = createContext<DataContextType | null>(null);
+
+function calcolaMoraGiorni(importoDovuto: number, giorni: number): number {
+  return Math.round(importoDovuto * 0.02 * (giorni / 30));
+}
 
 export function DataProvider({ children }: { children: React.ReactNode }) {
   const [data, setData] = useState<AppData>(loadData);
@@ -46,12 +69,33 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   const refresh = useCallback(() => setData(loadData()), []);
 
+  // Auto-aggiorna pagamenti scaduti (attesa → insoluto) al caricamento
+  useEffect(() => {
+    const now = new Date();
+    let hasChanges = false;
+    const updatedPagamenti = data.pagamenti.map(p => {
+      if (p.stato === 'attesa' && p.dataScadenza && new Date(p.dataScadenza) < now) {
+        const diffDays = Math.floor((now.getTime() - new Date(p.dataScadenza).getTime()) / 86400000);
+        const mora = calcolaMoraGiorni(p.importoDovuto, diffDays);
+        hasChanges = true;
+        return { ...p, stato: 'insoluto' as StatoPagamento, mora };
+      }
+      return p;
+    });
+    if (hasChanges) {
+      const newData = { ...data, pagamenti: updatedPagamenti };
+      setData(newData);
+      saveData(newData);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const makeAdd = (key: keyof AppData) =>
     (item: Record<string, unknown>) => {
       const newItem = { ...item, id: generateId(), createdAt: new Date().toISOString() };
       const arr = data[key] as unknown[];
       const newData = { ...data, [key]: [...arr, newItem] };
       persist(newData);
+      return newItem;
     };
 
   const makeUpdate = (key: keyof AppData) =>
@@ -68,6 +112,189 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       persist(newData);
     };
 
+  const addContrattoFn = (item: Omit<Contratto, 'id' | 'createdAt'>): Contratto => {
+    const newItem = { ...item, id: generateId(), createdAt: new Date().toISOString() } as Contratto;
+    // Aggiorna stato immobile ad 'affittato' se contratto attivo
+    const updatedImmobili = item.stato === 'attivo' && item.immobileId
+      ? data.immobili.map(i => i.id === item.immobileId ? { ...i, stato: 'affittato' as const } : i)
+      : data.immobili;
+    const newData = { ...data, contratti: [...data.contratti, newItem], immobili: updatedImmobili };
+    persist(newData);
+
+    // Genera pagamenti automatici se abilitati
+    if (item.pagamentiAutomatici && item.stato === 'attivo') {
+      setTimeout(() => generaPagamentiContrattoInternal(newItem.id, newData), 0);
+    }
+    return newItem;
+  };
+
+  const updateContrattoFn = (id: string, updates: Partial<Contratto>) => {
+    const contratto = data.contratti.find(c => c.id === id);
+    if (!contratto) return;
+    const updatedContratto = { ...contratto, ...updates };
+    // Aggiorna stato immobile se cambia stato contratto
+    let updatedImmobili = data.immobili;
+    if (updates.stato !== undefined && updatedContratto.immobileId) {
+      updatedImmobili = data.immobili.map(i => {
+        if (i.id !== updatedContratto.immobileId) return i;
+        if (updates.stato === 'attivo') return { ...i, stato: 'affittato' as const };
+        const hasOtherActive = data.contratti.some(c => c.id !== id && c.immobileId === i.id && c.stato === 'attivo');
+        return hasOtherActive ? i : { ...i, stato: 'libero' as const };
+      });
+    }
+    const newData = {
+      ...data,
+      contratti: data.contratti.map(c => c.id === id ? updatedContratto : c),
+      immobili: updatedImmobili,
+    };
+    persist(newData);
+  };
+
+  function generaPagamentiContrattoInternal(contrattoId: string, currentData: AppData): number {
+    const contratto = currentData.contratti.find(c => c.id === contrattoId);
+    if (!contratto) return 0;
+
+    const start = new Date(contratto.dataInizio);
+    const end = contratto.dataFine
+      ? new Date(contratto.dataFine)
+      : new Date(start.getFullYear() + 4, start.getMonth(), start.getDate());
+
+    const now = new Date();
+    const maxDate = new Date(now.getFullYear(), now.getMonth() + 3, 1); // genera fino a 3 mesi nel futuro
+    const limit = end < maxDate ? end : maxDate;
+
+    const nuoviPagamenti: Pagamento[] = [];
+    const current = new Date(start.getFullYear(), start.getMonth(), 1);
+    const canoneAdeguato = contratto.canone * (1 + (contratto.adeguamentoIstat || 0) / 100);
+
+    while (current <= limit) {
+      const meseRif = `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, '0')}`;
+      const exists = currentData.pagamenti.some(
+        p => p.contrattoId === contrattoId && p.meseRiferimento === meseRif && p.tipoPagamento === 'canone'
+      );
+      if (!exists) {
+        const dataScadenza = new Date(current.getFullYear(), current.getMonth(), 5);
+        const isScaduto = dataScadenza < now;
+        const giorni = isScaduto ? Math.floor((now.getTime() - dataScadenza.getTime()) / 86400000) : 0;
+        nuoviPagamenti.push({
+          id: generateId(),
+          contrattoId,
+          tipoPagamento: 'canone',
+          importo: 0,
+          importoDovuto: canoneAdeguato,
+          dataPagamento: '',
+          dataScadenza: dataScadenza.toISOString().slice(0, 10),
+          stato: isScaduto ? 'insoluto' : 'attesa',
+          isDeposito: false,
+          meseRiferimento: meseRif,
+          mora: isScaduto ? calcolaMoraGiorni(canoneAdeguato, giorni) : 0,
+          note: '',
+          createdAt: new Date().toISOString(),
+        });
+      }
+      current.setMonth(current.getMonth() + 1);
+    }
+
+    if (nuoviPagamenti.length > 0) {
+      const newData = { ...currentData, pagamenti: [...currentData.pagamenti, ...nuoviPagamenti] };
+      persist(newData);
+    }
+    return nuoviPagamenti.length;
+  }
+
+  const generaPagamentiContratto = useCallback((contrattoId: string): number => {
+    return generaPagamentiContrattoInternal(contrattoId, data);
+  }, [data]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const generaManutenzioniAutomatiche = useCallback((immobileId?: string): number => {
+    const target = immobileId ? data.immobili.filter(i => i.id === immobileId) : data.immobili;
+    const nuove: Manutenzione[] = [];
+    const now = new Date();
+
+    for (const imm of target) {
+      for (const tipo of MANUTENZIONI_AUTO) {
+        const pending = data.manutenzioni.find(
+          m => m.immobileId === imm.id && m.tipologia === tipo.tipologia && m.stato !== 'completata' && m.isAutomatica
+        );
+        if (!pending) {
+          // Trova l'ultima completata per calcolare la prossima scadenza
+          const lastCompleted = data.manutenzioni
+            .filter(m => m.immobileId === imm.id && m.tipologia === tipo.tipologia && m.stato === 'completata' && m.isAutomatica)
+            .sort((a, b) => b.dataCompletamento.localeCompare(a.dataCompletamento))[0];
+
+          let dataScadenza: Date;
+          if (lastCompleted?.dataCompletamento) {
+            dataScadenza = new Date(lastCompleted.dataCompletamento);
+            dataScadenza.setMonth(dataScadenza.getMonth() + tipo.mesi);
+          } else {
+            dataScadenza = new Date(imm.createdAt);
+            dataScadenza.setMonth(dataScadenza.getMonth() + tipo.mesi);
+          }
+
+          nuove.push({
+            id: generateId(),
+            immobileId: imm.id,
+            descrizione: tipo.descrizione,
+            tipologia: tipo.tipologia,
+            periodicita: tipo.periodicita,
+            isAutomatica: true,
+            tecnico: '',
+            costo: 0,
+            stato: dataScadenza < now ? 'aperta' : 'aperta',
+            dataSegnalazione: now.toISOString().slice(0, 10),
+            dataScadenza: dataScadenza.toISOString().slice(0, 10),
+            dataCompletamento: '',
+            note: '',
+            createdAt: now.toISOString(),
+          });
+        }
+      }
+    }
+
+    if (nuove.length > 0) {
+      const newData = { ...data, manutenzioni: [...data.manutenzioni, ...nuove] };
+      persist(newData);
+    }
+    return nuove.length;
+  }, [data, persist]);
+
+  const updateManutenzioneConRinnovo = (id: string, updates: Partial<Manutenzione>) => {
+    const man = data.manutenzioni.find(m => m.id === id);
+    const updated = { ...man, ...updates } as Manutenzione;
+    const arr = data.manutenzioni.map(m => m.id === id ? updated : m);
+    let newPagamenti = data.pagamenti;
+
+    // Se una manutenzione automatica viene completata, programma la prossima
+    if (updates.stato === 'completata' && updated.isAutomatica) {
+      const tipo = MANUTENZIONI_AUTO.find(t => t.tipologia === updated.tipologia);
+      if (tipo) {
+        const dataCompletata = new Date(updates.dataCompletamento || new Date().toISOString().slice(0, 10));
+        const prossima = new Date(dataCompletata);
+        prossima.setMonth(prossima.getMonth() + tipo.mesi);
+        const next: Manutenzione = {
+          id: generateId(),
+          immobileId: updated.immobileId,
+          descrizione: tipo.descrizione,
+          tipologia: tipo.tipologia,
+          periodicita: tipo.periodicita,
+          isAutomatica: true,
+          tecnico: '',
+          costo: 0,
+          stato: 'aperta',
+          dataSegnalazione: new Date().toISOString().slice(0, 10),
+          dataScadenza: prossima.toISOString().slice(0, 10),
+          dataCompletamento: '',
+          note: '',
+          createdAt: new Date().toISOString(),
+        };
+        arr.push(next);
+      }
+    }
+
+    const newData = { ...data, manutenzioni: arr, pagamenti: newPagamenti };
+    persist(newData);
+  };
+
   const value: DataContextType = {
     data,
     refresh,
@@ -80,17 +307,22 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     addInquilino: makeAdd('inquilini') as any,
     updateInquilino: makeUpdate('inquilini') as any,
     deleteInquilino: makeDelete('inquilini'),
-    addContratto: makeAdd('contratti') as any,
-    updateContratto: makeUpdate('contratti') as any,
+    addContratto: addContrattoFn,
+    updateContratto: updateContrattoFn,
     deleteContratto: makeDelete('contratti'),
     addPagamento: makeAdd('pagamenti') as any,
     updatePagamento: makeUpdate('pagamenti') as any,
     deletePagamento: makeDelete('pagamenti'),
     addManutenzione: makeAdd('manutenzioni') as any,
-    updateManutenzione: makeUpdate('manutenzioni') as any,
+    updateManutenzione: updateManutenzioneConRinnovo,
     deleteManutenzione: makeDelete('manutenzioni'),
+    addSpesaFissa: makeAdd('speseFisse') as any,
+    updateSpesaFissa: makeUpdate('speseFisse') as any,
+    deleteSpesaFissa: makeDelete('speseFisse'),
     addLead: makeAdd('lead') as any,
     deleteLead: makeDelete('lead'),
+    generaPagamentiContratto,
+    generaManutenzioniAutomatiche,
   };
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;

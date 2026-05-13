@@ -1,4 +1,4 @@
-import { AppData } from './types';
+import { AppData, StatoPagamento } from './types';
 
 const STORAGE_KEY = 'gestionale_immobiliare_data';
 
@@ -9,6 +9,7 @@ const defaultData: AppData = {
   contratti: [],
   pagamenti: [],
   manutenzioni: [],
+  speseFisse: [],
   lead: [],
 };
 
@@ -16,7 +17,35 @@ export function loadData(): AppData {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...defaultData };
-    return JSON.parse(raw) as AppData;
+    const stored = JSON.parse(raw) as AppData;
+    // Migrate existing data with defaults for new fields
+    return {
+      ...defaultData,
+      ...stored,
+      speseFisse: stored.speseFisse ?? [],
+      immobili: (stored.immobili ?? []).map(i => ({
+        valoreAcquisto: 0, valoreAttuale: 0, imu: 0, tari: 0, bollette: 0, speseBonifica: 0, allegati: [],
+        ...i,
+      })),
+      inquilini: (stored.inquilini ?? []).map(i => ({
+        tipoSoggetto: 'persona_fisica' as const, ragioneSociale: '', partitaIva: '', pec: '',
+        ...i,
+      })),
+      contratti: (stored.contratti ?? []).map(c => ({
+        tipoCedolare: 'ordinario' as const, aliquotaCedolare: 21, tipoDeposito: 'cauzionale' as const,
+        fidejussione: 0, pagamentiAutomatici: false,
+        ...c,
+      })),
+      pagamenti: (stored.pagamenti ?? []).map(p => ({
+        tipoPagamento: 'canone' as const, isDeposito: false, meseRiferimento: '',
+        ...p,
+        stato: (['pagato', 'parziale', 'insoluto', 'attesa'].includes(p.stato) ? p.stato : 'attesa') as StatoPagamento,
+      })),
+      manutenzioni: (stored.manutenzioni ?? []).map(m => ({
+        tipologia: 'altro' as const, periodicita: 'una_tantum' as const, isAutomatica: false, dataScadenza: '',
+        ...m,
+      })),
+    };
   } catch {
     return { ...defaultData };
   }
