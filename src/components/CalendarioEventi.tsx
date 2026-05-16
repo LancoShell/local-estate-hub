@@ -6,7 +6,7 @@ import { ChevronLeft, ChevronRight } from 'lucide-react';
 
 interface CalEvent {
   data: string;
-  tipo: 'pagamento_scaduto' | 'pagamento_attesa' | 'manutenzione' | 'contratto_scade';
+  tipo: 'pagamento_scaduto' | 'pagamento_attesa' | 'manutenzione' | 'contratto_scade' | 'spesa_fissa';
   label: string;
 }
 
@@ -15,6 +15,7 @@ const coloreEvento: Record<CalEvent['tipo'], string> = {
   pagamento_attesa: 'bg-warning',
   manutenzione: 'bg-orange-500',
   contratto_scade: 'bg-purple-500',
+  spesa_fissa: 'bg-blue-500',
 };
 
 const labelEvento: Record<CalEvent['tipo'], string> = {
@@ -22,6 +23,7 @@ const labelEvento: Record<CalEvent['tipo'], string> = {
   pagamento_attesa: 'Scadenza',
   manutenzione: 'Manutenzione',
   contratto_scade: 'Contratto',
+  spesa_fissa: 'IMU/TARI/Spesa',
 };
 
 const GG = ['Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab', 'Dom'];
@@ -54,6 +56,24 @@ export default function CalendarioEventi() {
   data.contratti.forEach(c => {
     if (!c.dataFine || c.stato !== 'attivo') return;
     events.push({ data: c.dataFine, tipo: 'contratto_scade', label: `Fine contratto: ${data.immobili.find(i => i.id === c.immobileId)?.codice || ''}` });
+  });
+
+  // Scadenze IMU, TARI e altre spese fisse per il mese visualizzato
+  const periodicityMonths: Record<string, number> = { mensile: 1, trimestrale: 3, semestrale: 6, annuale: 12 };
+  data.speseFisse.filter(s => s.attiva && s.dataInizio).forEach(s => {
+    const inizio = new Date(s.dataInizio);
+    const diffMesi = (anno - inizio.getFullYear()) * 12 + (mese - inizio.getMonth());
+    if (diffMesi < 0) return;
+    const mult = periodicityMonths[s.periodicita] ?? 1;
+    if (diffMesi % mult !== 0) return;
+    const imm = data.immobili.find(i => i.id === s.immobileId);
+    const dueDay = Math.min(inizio.getDate(), new Date(anno, mese + 1, 0).getDate());
+    const dataStr = `${anno}-${String(mese + 1).padStart(2, '0')}-${String(dueDay).padStart(2, '0')}`;
+    events.push({
+      data: dataStr,
+      tipo: 'spesa_fissa',
+      label: `${s.tipo.toUpperCase()}${imm ? ' ' + imm.codice : ''}: €${s.importo.toLocaleString('it-IT')}`,
+    });
   });
 
   // Calcola struttura del mese

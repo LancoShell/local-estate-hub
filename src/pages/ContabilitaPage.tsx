@@ -114,8 +114,21 @@ export default function ContabilitaPage() {
   const totaleMora = data.pagamenti.reduce((s, p) => s + (p.mora || 0), 0);
   const totaleDepositi = pagamentiDepositi.filter(p => p.stato === 'pagato').reduce((s, p) => s + p.importo, 0);
 
-  // Spese fisse annualizzate
+  // Spese fisse annualizzate (IMU, TARI, bollette, ecc.)
   const speseFisseAnnue = data.speseFisse.filter(s => s.attiva).reduce((sum, s) => sum + s.importo * periodicMult[s.periodicita], 0);
+  // Spese fisse proporzionate all'anno filtrato (quante rate cadono nell'anno selezionato)
+  const annoFiltro = parseInt(filtroAnno) || new Date().getFullYear();
+  const speseFisseAnno = data.speseFisse.filter(s => s.attiva && s.dataInizio).reduce((sum, s) => {
+    const inizio = new Date(s.dataInizio);
+    const mult = { mensile: 1, trimestrale: 3, semestrale: 6, annuale: 12 }[s.periodicita] ?? 1;
+    let count = 0;
+    for (let m = 0; m < 12; m++) {
+      const diffMesi = (annoFiltro - inizio.getFullYear()) * 12 + (m - inizio.getMonth());
+      if (diffMesi >= 0 && diffMesi % mult === 0) count++;
+    }
+    return sum + s.importo * count;
+  }, 0);
+  const saldoNetto = totaleEntrate - speseFisseAnno;
 
   // Affidabilità inquilini
   const affidabilita = data.inquilini.map(inq => {
@@ -198,10 +211,19 @@ export default function ContabilitaPage() {
       </div>
 
       {/* KPI */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
         <Card className="glass-card"><CardContent className="p-4">
           <p className="text-xs text-muted-foreground uppercase tracking-wide">Entrate Nette</p>
           <p className="text-2xl font-display font-bold text-success mt-1">€{totaleEntrate.toLocaleString('it-IT')}</p>
+        </CardContent></Card>
+        <Card className="glass-card"><CardContent className="p-4">
+          <p className="text-xs text-muted-foreground uppercase tracking-wide">Spese Fisse ({annoFiltro})</p>
+          <p className="text-2xl font-display font-bold text-destructive mt-1">€{speseFisseAnno.toLocaleString('it-IT')}</p>
+          <p className="text-xs text-muted-foreground">IMU · TARI · altro</p>
+        </CardContent></Card>
+        <Card className="glass-card"><CardContent className="p-4">
+          <p className="text-xs text-muted-foreground uppercase tracking-wide">Saldo Netto</p>
+          <p className={`text-2xl font-display font-bold mt-1 ${saldoNetto >= 0 ? 'text-success' : 'text-destructive'}`}>€{saldoNetto.toLocaleString('it-IT')}</p>
         </CardContent></Card>
         <Card className="glass-card"><CardContent className="p-4">
           <p className="text-xs text-muted-foreground uppercase tracking-wide">Insoluti</p>
