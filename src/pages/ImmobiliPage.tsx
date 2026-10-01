@@ -12,8 +12,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Plus, Search, Pencil, Trash2, Paperclip, Download, X, Wrench } from 'lucide-react';
 import { toast } from 'sonner';
 import { generateId } from '@/lib/dataStore';
+import { nomeProprietario } from '@/lib/calc';
 
-const tipologie: TipologiaImmobile[] = ['appartamento', 'villa', 'ufficio', 'negozio', 'magazzino', 'box', 'altro'];
+const tipologie: TipologiaImmobile[] = ['appartamento', 'villa', 'ufficio', 'negozio', 'magazzino', 'box', 'cantina', 'altro'];
 const classiEnergetiche: ClasseEnergetica[] = ['A4', 'A3', 'A2', 'A1', 'B', 'C', 'D', 'E', 'F', 'G'];
 const stati: StatoImmobile[] = ['libero', 'affittato', 'manutenzione'];
 
@@ -31,6 +32,15 @@ const emptyForm = {
   allegati: [] as Allegato[], note: '', proprietarioId: '',
 };
 
+type TipoPertinenza = 'garage' | 'cantina';
+const PERTINENZE: Array<{ tipo: TipoPertinenza; label: string; suffisso: string; tipologia: TipologiaImmobile }> = [
+  { tipo: 'garage', label: 'Garage', suffisso: 'G', tipologia: 'box' },
+  { tipo: 'cantina', label: 'Cantina', suffisso: 'C', tipologia: 'cantina' },
+];
+const emptyPert: Record<TipoPertinenza, { attivo: boolean; mq: number }> = {
+  garage: { attivo: false, mq: 0 }, cantina: { attivo: false, mq: 0 },
+};
+
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
 
 export default function ImmobiliPage() {
@@ -43,6 +53,7 @@ export default function ImmobiliPage() {
   const [editing, setEditing] = useState<string | null>(null);
   const [form, setForm] = useState(emptyForm);
   const [tab, setTab] = useState('info');
+  const [pert, setPert] = useState(emptyPert);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const filtered = data.immobili.filter(i => {
@@ -55,15 +66,29 @@ export default function ImmobiliPage() {
 
   const handleSave = () => {
     if (!form.codice || !form.indirizzo) { toast.error('Codice e indirizzo sono obbligatori'); return; }
+    let principale: Immobile;
     if (editing) {
       updateImmobile(editing, form);
-      toast.success('Immobile aggiornato');
+      principale = { ...data.immobili.find(i => i.id === editing)!, ...form };
     } else {
-      addImmobile(form);
-      toast.success('Immobile aggiunto');
+      principale = addImmobile(form);
     }
-    setForm(emptyForm); setEditing(null); setOpen(false); setTab('info');
+    // Pertinenze (garage / cantina) create e associate direttamente all'immobile
+    const nuove = PERTINENZE.filter(t => pert[t.tipo].attivo && !pertinenzeEsistenti(principale.id).some(e => e.tipologia === t.tipologia));
+    nuove.forEach(t => addImmobile({
+      ...emptyForm,
+      codice: `${principale.codice}-${t.suffisso}`, tipologia: t.tipologia,
+      indirizzo: form.indirizzo, citta: form.citta, cap: form.cap, mq: pert[t.tipo].mq,
+      classeEnergetica: form.classeEnergetica, proprietarioId: form.proprietarioId,
+      immobilePrincipaleId: principale.id, note: `${t.label} di ${principale.codice}`,
+    }));
+    toast.success(`${editing ? 'Immobile aggiornato' : 'Immobile aggiunto'}${nuove.length ? ` con ${nuove.map(t => t.label.toLowerCase()).join(' e ')}` : ''}`);
+    resetForm();
   };
+
+  const resetForm = () => { setForm(emptyForm); setPert(emptyPert); setEditing(null); setOpen(false); setTab('info'); };
+
+  const pertinenzeEsistenti = (immobileId: string) => data.immobili.filter(i => i.immobilePrincipaleId === immobileId);
 
   const handleEdit = (imm: Immobile) => {
     setForm({
@@ -75,6 +100,7 @@ export default function ImmobiliPage() {
       imu: imm.imu || 0, tari: imm.tari || 0, bollette: imm.bollette || 0,
       speseBonifica: imm.speseBonifica || 0, allegati: imm.allegati || [],
     });
+    setPert(emptyPert);
     setEditing(imm.id); setOpen(true); setTab('info');
   };
 
@@ -114,10 +140,7 @@ export default function ImmobiliPage() {
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   };
 
-  const getProprietario = (id: string) => {
-    const p = data.proprietari.find(x => x.id === id);
-    return p ? `${p.nome} ${p.cognome}` : '—';
-  };
+  const getProprietario = (id: string) => nomeProprietario(data.proprietari.find(x => x.id === id));
 
   const rendimento = (imm: Immobile) => {
     if (!imm.valoreAttuale) return null;
@@ -139,7 +162,7 @@ export default function ImmobiliPage() {
           }}>
             <Wrench className="w-4 h-4 mr-2" />Auto-Manutenzioni
           </Button>
-          <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) { setEditing(null); setForm(emptyForm); setTab('info'); } }}>
+          <Dialog open={open} onOpenChange={(o) => { if (o) setOpen(true); else resetForm(); }}>
             <DialogTrigger asChild>
               <Button><Plus className="w-4 h-4 mr-2" />Nuovo Immobile</Button>
             </DialogTrigger>
@@ -186,10 +209,35 @@ export default function ImmobiliPage() {
                     <div><Label>Proprietario</Label>
                       <Select value={form.proprietarioId} onValueChange={v => setForm({...form, proprietarioId: v})}>
                         <SelectTrigger><SelectValue placeholder="Seleziona" /></SelectTrigger>
-                        <SelectContent>{data.proprietari.map(p => <SelectItem key={p.id} value={p.id}>{p.nome} {p.cognome}</SelectItem>)}</SelectContent>
+                        <SelectContent>{data.proprietari.map(p => <SelectItem key={p.id} value={p.id}>{nomeProprietario(p)}</SelectItem>)}</SelectContent>
                       </Select>
                     </div>
                     <div><Label>Note</Label><Input value={form.note} onChange={e => setForm({...form, note: e.target.value})} /></div>
+
+                    {!(editing && data.immobili.find(i => i.id === editing)?.immobilePrincipaleId) ? (
+                      <div className="col-span-2 border-t pt-3 space-y-2">
+                        <p className="text-sm font-medium text-muted-foreground">Pertinenze (associate a questo immobile)</p>
+                        {PERTINENZE.map(t => {
+                          const esistente = editing ? pertinenzeEsistenti(editing).find(e => e.tipologia === t.tipologia) : undefined;
+                          return esistente ? (
+                            <p key={t.tipo} className="text-sm">{t.label}: <strong>{esistente.codice}</strong> <span className="text-muted-foreground">({esistente.mq} mq) già associato</span></p>
+                          ) : (
+                            <div key={t.tipo} className="flex items-center gap-3">
+                              <input type="checkbox" id={`pert-${t.tipo}`} className="w-4 h-4" checked={pert[t.tipo].attivo}
+                                onChange={e => setPert({ ...pert, [t.tipo]: { ...pert[t.tipo], attivo: e.target.checked } })} />
+                              <label htmlFor={`pert-${t.tipo}`} className="text-sm cursor-pointer w-20">{t.label}</label>
+                              {pert[t.tipo].attivo && (
+                                <>
+                                  <Input type="number" className="w-28 h-8" placeholder="Mq" value={pert[t.tipo].mq || ''}
+                                    onChange={e => setPert({ ...pert, [t.tipo]: { ...pert[t.tipo], mq: +e.target.value } })} />
+                                  <span className="text-xs text-muted-foreground">mq · codice {form.codice || '…'}-{t.suffisso}</span>
+                                </>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : null}
                   </div>
                 </TabsContent>
 
@@ -247,7 +295,7 @@ export default function ImmobiliPage() {
                 </TabsContent>
               </Tabs>
               <div className="flex justify-end gap-2 mt-4 pt-4 border-t">
-                <Button variant="outline" onClick={() => { setOpen(false); setEditing(null); setForm(emptyForm); }}>Annulla</Button>
+                <Button variant="outline" onClick={resetForm}>Annulla</Button>
                 <Button onClick={handleSave}>{editing ? 'Aggiorna' : 'Salva'}</Button>
               </div>
             </DialogContent>
@@ -265,7 +313,7 @@ export default function ImmobiliPage() {
           <SelectTrigger><SelectValue placeholder="Tutti i proprietari" /></SelectTrigger>
           <SelectContent>
             <SelectItem value="tutti">Tutti i proprietari</SelectItem>
-            {data.proprietari.map(p => <SelectItem key={p.id} value={p.id}>{p.nome} {p.cognome}</SelectItem>)}
+            {data.proprietari.map(p => <SelectItem key={p.id} value={p.id}>{nomeProprietario(p)}</SelectItem>)}
           </SelectContent>
         </Select>
         <Select value={filtroTipologia} onValueChange={setFiltroTipologia}>
@@ -300,6 +348,12 @@ export default function ImmobiliPage() {
                       <div>
                         <p className="font-display font-semibold text-sm">{imm.codice}</p>
                         <p className="text-xs text-muted-foreground capitalize">{imm.tipologia}</p>
+                        {imm.immobilePrincipaleId && (
+                          <p className="text-xs text-info">Pertinenza di {data.immobili.find(i => i.id === imm.immobilePrincipaleId)?.codice || '—'}</p>
+                        )}
+                        {pertinenzeEsistenti(imm.id).length > 0 && (
+                          <p className="text-xs text-info">+ {pertinenzeEsistenti(imm.id).map(e => e.tipologia === 'cantina' ? 'cantina' : 'garage').join(', ')}</p>
+                        )}
                       </div>
                       <div className="md:col-span-2">
                         <p className="text-sm">{imm.indirizzo}</p>

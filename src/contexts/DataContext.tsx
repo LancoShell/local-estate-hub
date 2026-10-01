@@ -2,8 +2,10 @@ import React, { createContext, useContext, useState, useCallback, useEffect, use
 import {
   AppData, Immobile, Proprietario, Inquilino, Contratto, Pagamento,
   Manutenzione, Lead, SpesaFissa, StatoPagamento, TipologiaManutenzione, PeriodicitaManutenzione,
+  TipoSpesa, PeriodicitaSpesa,
 } from '@/lib/types';
 import { loadData, saveData, generateId } from '@/lib/dataStore';
+import { calcolaMora, canoneAdeguato, fmtData, giorniRitardo, moraAttuale, parseData } from '@/lib/calc';
 
 const MANUTENZIONI_AUTO: Array<{ tipologia: TipologiaManutenzione; descrizione: string; periodicita: PeriodicitaManutenzione; mesi: number }> = [
   { tipologia: 'caldaia', descrizione: 'Revisione annuale caldaia', periodicita: 'annuale', mesi: 12 },
@@ -18,7 +20,7 @@ interface DataContextType {
   data: AppData;
   refresh: () => void;
   // Immobili
-  addImmobile: (item: Omit<Immobile, 'id' | 'createdAt'>) => void;
+  addImmobile: (item: Omit<Immobile, 'id' | 'createdAt'>) => Immobile;
   updateImmobile: (id: string, item: Partial<Immobile>) => void;
   deleteImmobile: (id: string) => void;
   // Proprietari
@@ -37,6 +39,7 @@ interface DataContextType {
   addPagamento: (item: Omit<Pagamento, 'id' | 'createdAt'>) => void;
   updatePagamento: (id: string, item: Partial<Pagamento>) => void;
   deletePagamento: (id: string) => void;
+  pagaPagamento: (id: string) => number;
   // Manutenzioni
   addManutenzione: (item: Omit<Manutenzione, 'id' | 'createdAt'>) => void;
   updateManutenzione: (id: string, item: Partial<Manutenzione>) => void;
@@ -55,8 +58,119 @@ interface DataContextType {
 
 const DataContext = createContext<DataContextType | null>(null);
 
-function calcolaMoraGiorni(importoDovuto: number, giorni: number): number {
-  return Math.round(importoDovuto * 0.02 * (giorni / 30));
+const SPESE_IMMOBILE: Array<{
+  key: 'imu' | 'tari' | 'bollette'; tipo: TipoSpesa; periodicita: PeriodicitaSpesa;
+  descrizione: string; mmgg: string; importo: (i: Immobile) => number;
+}> = [
+  { key: 'imu', tipo: 'imu', periodicita: 'semestrale', descrizione: 'IMU (acconto 16/6 e saldo 16/12)', mmgg: '06-16', importo: i => (i.imu || 0) / 2 },
+  { key: 'tari', tipo: 'tari', periodicita: 'semestrale', descrizione: 'TARI (2 rate)', mmgg: '04-30', importo: i => (i.tari || 0) / 2 },
+  { key: 'bollette', tipo: 'bolletta', periodicita: 'mensile', descrizione: 'Bollette', mmgg: '01-01', importo: i => i.bollette || 0 },
+];
+
+/** Allinea le spese fisse generate (IMU, TARI, bollette) ai valori dell'immobile. */
+function syncSpeseImmobile(d: AppData, immobileId: string): AppData {
+  const imm = d.immobili.find(i => i.id === immobileId);
+  if (!imm) return d;
+  let spese = d.speseFisse;
+  const anno = new Date().getFullYear();
+  for (const def of SPESE_IMMOBILE) {
+    const importo = def.importo(imm);
+    const existing = spese.find(s => s.immobileId === immobileId && s.autoKey === def.key);
+    if (importo > 0) {
+      if (existing) {
+        if (existing.importo !== importo || !existing.attiva) {
+          spese = spese.map(s => s === existing ? { ...s, importo, attiva: true } : s);
+        }
+      } else {
+        spese = [...spese, {
+          id: generateId(), immobileId, tipo: def.tipo, descrizione: def.descrizione, importo,
+          periodicita: def.periodicita, dataInizio: `${anno}-${def.mmgg}`, attiva: true,
+          autoKey: def.key, note: "Generata dai dati dell'immobile", createdAt: new Date().toISOString(),
+        }];
+      }
+    } else if (existing) {
+      spese = spese.filter(s => s !== existing);
+    }
+  }
+  return spese === d.speseFisse ? d : { ...d, speseFisse: spese };
+}
+
+/** Ricalcola stato (attesa -> insoluto) e mora dei pagamenti non saldati. */
+function aggiornaMoraPagamenti(pagamenti: Pagamento[], oggi = new Date()): Pagamento[] {
+  let changed = false;
+  const out = pagamenti.map(p => {
+    if (p.isDeposito || p.stato === 'pagato' || !p.dataScadenza) return p;
+    const scaduto = giorniRitardo(p.dataScadenza, oggi) > 0;
+    const stato: StatoPagamento = scaduto && p.stato === 'attesa' ? 'insoluto' : p.stato;
+    const mora = scaduto ? moraAttuale(p, oggi) : 0;
+    if (stato === p.stato && mora === p.mora) return p;
+    changed = true;
+    return { ...p, stato, mora };
+  });
+  return changed ? out : pagamenti;
+}
+
+/** Allinea al contratto: canone sull'immobile, rate non pagate, deposito e spese di registrazione. */
+function syncContratto(d: AppData, contrattoId: string, ricalcolaRate: boolean): AppData {
+  const c = d.contratti.find(x => x.id === contrattoId);
+  if (!c) return d;
+  const now = new Date().toISOString();
+  let { immobili, pagamenti } = d;
+
+  if (c.stato === 'attivo' && c.canone > 0 && c.immobileId) {
+    immobili = immobili.map(i => i.id === c.immobileId ? { ...i, prezzoRichiesto: c.canone } : i);
+  }
+
+  if (ricalcolaRate) {
+    const dovuto = canoneAdeguato(c);
+    pagamenti = pagamenti.map(p =>
+      p.contrattoId === c.id && p.tipoPagamento === 'canone' && (p.stato === 'attesa' || p.stato === 'insoluto')
+        ? { ...p, importoDovuto: dovuto } : p);
+  }
+
+  // Deposito / fidejussione
+  const depositoDa = c.tipoDeposito !== 'nessuno' && c.deposito > 0;
+  const dep = pagamenti.find(p => p.contrattoId === c.id && p.autoKey === 'deposito');
+  if (depositoDa) {
+    const tipoPagamento = c.tipoDeposito === 'cauzionale' ? 'deposito' as const : 'fidejussione' as const;
+    if (dep) {
+      pagamenti = pagamenti.map(p => p === dep
+        ? { ...p, tipoPagamento, importoDovuto: c.deposito, importo: p.stato === 'pagato' ? c.deposito : p.importo } : p);
+    } else {
+      pagamenti = [...pagamenti, {
+        id: generateId(), contrattoId: c.id, tipoPagamento, importo: c.deposito, importoDovuto: c.deposito,
+        dataPagamento: c.dataInizio, dataScadenza: c.dataInizio, stato: 'pagato', isDeposito: true,
+        meseRiferimento: c.dataInizio.slice(0, 7), mora: 0, autoKey: 'deposito',
+        note: 'Registrato automaticamente dal contratto', createdAt: now,
+      }];
+    }
+  } else if (dep) {
+    pagamenti = pagamenti.filter(p => p !== dep);
+  }
+
+  // Spese di registrazione: 50% a carico dell'inquilino, da versare come rata
+  const reg = pagamenti.find(p => p.contrattoId === c.id && p.autoKey === 'registrazione');
+  if (c.speseRegistrazione > 0) {
+    const meta = Math.round(c.speseRegistrazione / 2 * 100) / 100;
+    if (reg) {
+      pagamenti = pagamenti.map(p => p === reg
+        ? { ...p, importoDovuto: meta, importo: p.stato === 'pagato' ? meta : p.importo } : p);
+    } else {
+      const scad = parseData(c.dataInizio);
+      scad.setDate(scad.getDate() + 30); // l'imposta di registro si versa entro 30 giorni dalla stipula
+      pagamenti = [...pagamenti, {
+        id: generateId(), contrattoId: c.id, tipoPagamento: 'registrazione', importo: 0, importoDovuto: meta,
+        dataPagamento: '', dataScadenza: fmtData(scad), stato: 'attesa', isDeposito: false,
+        meseRiferimento: c.dataInizio.slice(0, 7), mora: 0, autoKey: 'registrazione',
+        note: "50% delle spese di registrazione a carico dell'inquilino", createdAt: now,
+      }];
+    }
+  } else if (reg) {
+    pagamenti = pagamenti.filter(p => p !== reg);
+  }
+
+  pagamenti = aggiornaMoraPagamenti(pagamenti);
+  return { ...d, immobili, pagamenti };
 }
 
 export function DataProvider({ children }: { children: React.ReactNode }) {
@@ -76,24 +190,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     setData(loaded);
   }, []);
 
-  // Auto-aggiorna pagamenti scaduti (attesa → insoluto) al caricamento
+  // All'avvio: aggiorna stato/mora dei pagamenti scaduti e allinea le spese fisse degli immobili
   useEffect(() => {
-    const now = new Date();
-    let hasChanges = false;
-    const updatedPagamenti = data.pagamenti.map(p => {
-      if (p.stato === 'attesa' && p.dataScadenza && new Date(p.dataScadenza) < now) {
-        const diffDays = Math.floor((now.getTime() - new Date(p.dataScadenza).getTime()) / 86400000);
-        const mora = calcolaMoraGiorni(p.importoDovuto, diffDays);
-        hasChanges = true;
-        return { ...p, stato: 'insoluto' as StatoPagamento, mora };
-      }
-      return p;
-    });
-    if (hasChanges) {
-      const newData = { ...data, pagamenti: updatedPagamenti };
-      setData(newData);
-      saveData(newData);
-    }
+    const before = dataRef.current;
+    let d = { ...before, pagamenti: aggiornaMoraPagamenti(before.pagamenti) };
+    d.immobili.forEach(i => { d = syncSpeseImmobile(d, i.id); });
+    if (d.pagamenti !== before.pagamenti || d.speseFisse !== before.speseFisse) persist(d);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const makeAdd = (key: keyof AppData) =>
@@ -122,6 +224,43 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       persist(newData);
     };
 
+  const addImmobileFn = (item: Omit<Immobile, 'id' | 'createdAt'>): Immobile => {
+    const current = dataRef.current;
+    const newItem = { ...item, id: generateId(), createdAt: new Date().toISOString() } as Immobile;
+    persist(syncSpeseImmobile({ ...current, immobili: [...current.immobili, newItem] }, newItem.id));
+    return newItem;
+  };
+
+  const updateImmobileFn = (id: string, updates: Partial<Immobile>) => {
+    const current = dataRef.current;
+    const newData = { ...current, immobili: current.immobili.map(i => i.id === id ? { ...i, ...updates } : i) };
+    persist(syncSpeseImmobile(newData, id));
+  };
+
+  const deleteImmobileFn = (id: string) => {
+    const current = dataRef.current;
+    persist({
+      ...current,
+      immobili: current.immobili.filter(i => i.id !== id).map(i => i.immobilePrincipaleId === id ? { ...i, immobilePrincipaleId: undefined } : i),
+      speseFisse: current.speseFisse.filter(s => !(s.immobileId === id && s.autoKey)),
+    });
+  };
+
+  /** Salda un pagamento: importo = rata + mora maturata alla data di oggi. */
+  const pagaPagamento = (id: string): number => {
+    const current = dataRef.current;
+    const p = current.pagamenti.find(x => x.id === id);
+    if (!p) return 0;
+    const mora = moraAttuale(p);
+    const totale = Math.round((p.importoDovuto + mora) * 100) / 100;
+    persist({
+      ...current,
+      pagamenti: current.pagamenti.map(x => x.id === id
+        ? { ...x, stato: 'pagato' as const, mora, importo: totale, dataPagamento: fmtData(new Date()) } : x),
+    });
+    return totale;
+  };
+
   const addContrattoFn = (item: Omit<Contratto, 'id' | 'createdAt'>): Contratto => {
     const current = dataRef.current;
     const newItem = { ...item, id: generateId(), createdAt: new Date().toISOString() } as Contratto;
@@ -129,10 +268,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       ? current.immobili.map(i => i.id === item.immobileId ? { ...i, stato: 'affittato' as const } : i)
       : current.immobili;
     const newData = { ...current, contratti: [...current.contratti, newItem], immobili: updatedImmobili };
-    persist(newData);
+    persist(syncContratto(newData, newItem.id, false));
 
     if (item.pagamentiAutomatici && item.stato === 'attivo') {
-      setTimeout(() => generaPagamentiContrattoInternal(newItem.id, dataRef.current), 0);
+      generaPagamentiContrattoInternal(newItem.id, dataRef.current);
     }
     return newItem;
   };
@@ -156,7 +295,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       contratti: current.contratti.map(c => c.id === id ? updatedContratto : c),
       immobili: updatedImmobili,
     };
-    persist(newData);
+    const ricalcola = updates.canone !== undefined || updates.adeguamentoIstat !== undefined || updates.quotaIstat !== undefined;
+    persist(syncContratto(newData, id, ricalcola));
   };
 
   function generaPagamentiContrattoInternal(contrattoId: string, currentData: AppData): number {
@@ -178,7 +318,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       ? new Date(start.getFullYear(), start.getMonth() + 1, 1)
       : new Date(start.getFullYear(), start.getMonth(), 1);
     const current = new Date(firstPayMonth);
-    const canoneAdeguato = contratto.canone * (1 + (contratto.adeguamentoIstat || 0) / 100);
+    const canoneMese = canoneAdeguato(contratto);
 
     while (current <= limit) {
       const meseRif = `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, '0')}`;
@@ -188,19 +328,19 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       if (!exists) {
         const dataScadenza = new Date(current.getFullYear(), current.getMonth(), 5);
         const isScaduto = dataScadenza < now;
-        const giorni = isScaduto ? Math.floor((now.getTime() - dataScadenza.getTime()) / 86400000) : 0;
+        const giorni = giorniRitardo(fmtData(dataScadenza), now);
         nuoviPagamenti.push({
           id: generateId(),
           contrattoId,
           tipoPagamento: 'canone',
           importo: 0,
-          importoDovuto: canoneAdeguato,
+          importoDovuto: canoneMese,
           dataPagamento: '',
-          dataScadenza: dataScadenza.toISOString().slice(0, 10),
+          dataScadenza: fmtData(dataScadenza),
           stato: isScaduto ? 'insoluto' : 'attesa',
           isDeposito: false,
           meseRiferimento: meseRif,
-          mora: isScaduto ? calcolaMoraGiorni(canoneAdeguato, giorni) : 0,
+          mora: isScaduto ? calcolaMora(canoneMese, giorni) : 0,
           note: '',
           createdAt: new Date().toISOString(),
         });
@@ -312,9 +452,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const value: DataContextType = {
     data,
     refresh,
-    addImmobile: makeAdd('immobili') as any,
-    updateImmobile: makeUpdate('immobili') as any,
-    deleteImmobile: makeDelete('immobili'),
+    addImmobile: addImmobileFn,
+    updateImmobile: updateImmobileFn,
+    deleteImmobile: deleteImmobileFn,
     addProprietario: makeAdd('proprietari') as any,
     updateProprietario: makeUpdate('proprietari') as any,
     deleteProprietario: makeDelete('proprietari'),
@@ -327,6 +467,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     addPagamento: makeAdd('pagamenti') as any,
     updatePagamento: makeUpdate('pagamenti') as any,
     deletePagamento: makeDelete('pagamenti'),
+    pagaPagamento,
     addManutenzione: makeAdd('manutenzioni') as any,
     updateManutenzione: updateManutenzioneConRinnovo,
     deleteManutenzione: makeDelete('manutenzioni'),

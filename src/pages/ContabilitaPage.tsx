@@ -11,9 +11,10 @@ import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Plus, Trash2, Pencil, RefreshCw, TrendingUp, AlertTriangle } from 'lucide-react';
 import { toast } from 'sonner';
+import { calcolaMora, canoneAdeguato, fmtData, giorniRitardo, moraAttuale, nomeProprietario } from '@/lib/calc';
 
 const statiPag: StatoPagamento[] = ['pagato', 'parziale', 'insoluto', 'attesa'];
-const tipiPagamento: TipoPagamento[] = ['canone', 'deposito', 'fidejussione', 'imu', 'tari', 'bolletta', 'condominio', 'manutenzione', 'altro'];
+const tipiPagamento: TipoPagamento[] = ['canone', 'deposito', 'fidejussione', 'registrazione', 'imu', 'tari', 'bolletta', 'condominio', 'manutenzione', 'altro'];
 const tipiSpesa: TipoSpesa[] = ['imu', 'tari', 'bolletta', 'condominio', 'bonifica', 'altro'];
 const periodicita: PeriodicitaSpesa[] = ['mensile', 'trimestrale', 'semestrale', 'annuale'];
 
@@ -32,13 +33,13 @@ const emptyPag = {
 
 const emptySpesa = {
   immobileId: '', tipo: 'imu' as TipoSpesa, descrizione: '', importo: 0,
-  periodicita: 'annuale' as PeriodicitaSpesa, dataInizio: '', attiva: true, note: '',
+  periodicita: 'annuale' as PeriodicitaSpesa, dataInizio: fmtData(new Date()), attiva: true, note: '',
 };
 
 const periodicMult = { mensile: 12, trimestrale: 4, semestrale: 2, annuale: 1 };
 
 export default function ContabilitaPage() {
-  const { data, addPagamento, updatePagamento, deletePagamento, addSpesaFissa, updateSpesaFissa, deleteSpesaFissa, generaPagamentiContratto } = useData();
+  const { data, addPagamento, pagaPagamento, deletePagamento, addSpesaFissa, updateSpesaFissa, deleteSpesaFissa, generaPagamentiContratto } = useData();
 
   const [openPag, setOpenPag] = useState(false);
   const [formPag, setFormPag] = useState(emptyPag);
@@ -60,7 +61,7 @@ export default function ContabilitaPage() {
     setFormPag(prev => ({
       ...prev,
       contrattoId: v,
-      importoDovuto: c?.canone ?? 0,
+      importoDovuto: c ? canoneAdeguato(c) : 0,
       meseRiferimento: mese,
       isDeposito: ['deposito', 'fidejussione'].includes(prev.tipoPagamento),
     }));
@@ -75,8 +76,7 @@ export default function ContabilitaPage() {
     if (!form.dataScadenza) { toast.error('Data scadenza obbligatoria'); return; }
     let mora = 0;
     if (formPag.stato === 'insoluto' && formPag.dataScadenza) {
-      const diffDays = Math.max(0, Math.floor((Date.now() - new Date(formPag.dataScadenza).getTime()) / 86400000));
-      mora = Math.round(formPag.importoDovuto * 0.02 * (diffDays / 30));
+      mora = calcolaMora(formPag.importoDovuto, giorniRitardo(formPag.dataScadenza));
     }
     addPagamento({ ...formPag, mora });
     toast.success('Pagamento registrato');
@@ -85,6 +85,7 @@ export default function ContabilitaPage() {
 
   const handleSaveSpesa = () => {
     if (!formSpesa.immobileId || !formSpesa.importo) { toast.error('Immobile e importo obbligatori'); return; }
+    if (!formSpesa.dataInizio) { toast.error('Data inizio obbligatoria (serve per mostrare la spesa nel calendario)'); return; }
     if (editingSpesa) { updateSpesaFissa(editingSpesa, formSpesa); toast.success('Aggiornata'); }
     else { addSpesaFissa(formSpesa); toast.success('Spesa aggiunta'); }
     setFormSpesa(emptySpesa); setEditingSpesa(null); setOpenSpesa(false);
@@ -111,8 +112,8 @@ export default function ContabilitaPage() {
 
   const totaleEntrate = pagamentiCanoni.filter(p => p.stato === 'pagato').reduce((s, p) => s + p.importo, 0);
   const totaleInsoluti = insoluti.reduce((s, p) => s + p.importoDovuto, 0);
-  const totaleMora = data.pagamenti.reduce((s, p) => s + (p.mora || 0), 0);
-  const totaleDepositi = pagamentiDepositi.filter(p => p.stato === 'pagato').reduce((s, p) => s + p.importo, 0);
+  const totaleMora = data.pagamenti.reduce((s, p) => s + (p.isDeposito ? 0 : moraAttuale(p)), 0);
+  const totaleDepositi = pagamentiDepositi.filter(p => p.stato === 'pagato' && p.tipoPagamento === 'deposito').reduce((s, p) => s + p.importo, 0);
 
   // Spese fisse annualizzate (IMU, TARI, bollette, ecc.)
   const speseFisseAnnue = data.speseFisse.filter(s => s.attiva).reduce((sum, s) => sum + s.importo * periodicMult[s.periodicita], 0);
@@ -262,7 +263,7 @@ export default function ContabilitaPage() {
               <SelectTrigger><SelectValue placeholder="Tutti i proprietari" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="tutti">Tutti i proprietari</SelectItem>
-                {data.proprietari.map(p => <SelectItem key={p.id} value={p.id}>{p.nome} {p.cognome}</SelectItem>)}
+                {data.proprietari.map(p => <SelectItem key={p.id} value={p.id}>{nomeProprietario(p)}</SelectItem>)}
               </SelectContent>
             </Select>
             <Select value={filtroTipologia} onValueChange={setFiltroTipologia}>
@@ -311,15 +312,15 @@ export default function ContabilitaPage() {
                         <p className="text-muted-foreground text-xs">{nomeInq}</p>
                         <p>{p.meseRiferimento || p.dataScadenza}</p>
                         <p>€{p.importo.toLocaleString('it-IT')} / <span className="text-muted-foreground">€{p.importoDovuto.toLocaleString('it-IT')}</span></p>
-                        {p.mora > 0 && <p className="text-destructive text-xs">Mora: €{p.mora}</p>}
-                        <Badge variant="outline" className={`w-fit ${statoBadge[p.stato]}`}>{p.stato}</Badge>
+                        {moraAttuale(p) > 0 && <p className="text-destructive text-xs">Mora: €{moraAttuale(p).toLocaleString('it-IT')}</p>}
+                        <Badge variant="outline" className={`w-fit ${statoBadge[p.stato]}`}>{p.tipoPagamento !== 'canone' ? `${p.tipoPagamento} · ` : ''}{p.stato}</Badge>
                       </div>
                       <div className="flex gap-1">
-                        {p.stato === 'attesa' && (
+                        {(p.stato === 'attesa' || p.stato === 'insoluto' || p.stato === 'parziale') && (
                           <Button size="sm" variant="outline" onClick={() => {
-                            updatePagamento(p.id, { stato: 'pagato', importo: p.importoDovuto, dataPagamento: new Date().toISOString().slice(0, 10) });
-                            toast.success('Pagato');
-                          }}>✓ Paga</Button>
+                            const tot = pagaPagamento(p.id);
+                            toast.success(`Pagato €${tot.toLocaleString('it-IT')}`);
+                          }}>✓ Paga €{(p.importoDovuto + moraAttuale(p)).toLocaleString('it-IT')}</Button>
                         )}
                         <Button variant="ghost" size="icon" onClick={() => { deletePagamento(p.id); toast.success('Eliminato'); }}><Trash2 className="w-4 h-4 text-destructive" /></Button>
                       </div>
@@ -369,7 +370,7 @@ export default function ContabilitaPage() {
               const imm = c ? getImmobile(c.immobileId) : null;
               const inq = c ? getInquilino(c.inquilinoId) : null;
               const nome = inq?.tipoSoggetto === 'azienda' ? inq.ragioneSociale : (inq ? `${inq.nome} ${inq.cognome}` : '');
-              const giorni = Math.floor((Date.now() - new Date(p.dataScadenza).getTime()) / 86400000);
+              const giorni = giorniRitardo(p.dataScadenza);
               return (
                 <Card key={p.id} className="glass-card border-destructive/30">
                   <CardContent className="p-3 flex items-center justify-between gap-2">
@@ -377,13 +378,14 @@ export default function ContabilitaPage() {
                     <div className="flex-1 grid grid-cols-2 md:grid-cols-5 gap-2 text-sm items-center">
                       <p className="font-semibold">{imm?.codice || '—'}</p>
                       <p className="text-muted-foreground">{nome}</p>
-                      <p className="text-destructive font-medium">€{p.importoDovuto.toLocaleString('it-IT')}</p>
+                      <p className="text-destructive font-medium">€{(p.importoDovuto + moraAttuale(p)).toLocaleString('it-IT')}
+                        {moraAttuale(p) > 0 && <span className="block text-xs font-normal text-muted-foreground">€{p.importoDovuto.toLocaleString('it-IT')} + €{moraAttuale(p).toLocaleString('it-IT')} mora</span>}
+                      </p>
                       <p className="text-xs text-muted-foreground">Scad: {p.dataScadenza} ({giorni}gg fa)</p>
-                      {p.mora > 0 && <p className="text-xs text-destructive">+ €{p.mora} mora</p>}
                     </div>
                     <Button size="sm" variant="outline" onClick={() => {
-                      updatePagamento(p.id, { stato: 'pagato', importo: p.importoDovuto, dataPagamento: new Date().toISOString().slice(0, 10) });
-                      toast.success('Segnato come pagato');
+                      const tot = pagaPagamento(p.id);
+                      toast.success(`Pagato €${tot.toLocaleString('it-IT')} (rata + mora)`);
                     }}>✓ Paga</Button>
                     <Button variant="ghost" size="icon" onClick={() => { deletePagamento(p.id); toast.success('Eliminato'); }}><Trash2 className="w-4 h-4 text-destructive" /></Button>
                   </CardContent>
@@ -495,7 +497,7 @@ export default function ContabilitaPage() {
                     </Select>
                   </div>
                   <div><Label>Importo €</Label><Input type="number" value={formSpesa.importo} onChange={e => setFormSpesa({...formSpesa, importo: +e.target.value})} /></div>
-                  <div><Label>Data Inizio</Label><Input type="date" value={formSpesa.dataInizio} onChange={e => setFormSpesa({...formSpesa, dataInizio: e.target.value})} /></div>
+                  <div><Label>Prima scadenza *</Label><Input type="date" value={formSpesa.dataInizio} onChange={e => setFormSpesa({...formSpesa, dataInizio: e.target.value})} /></div>
                   <div className="col-span-2"><Label>Descrizione</Label><Input value={formSpesa.descrizione} onChange={e => setFormSpesa({...formSpesa, descrizione: e.target.value})} /></div>
                   <div className="col-span-2 flex items-center gap-2">
                     <input type="checkbox" id="attiva" checked={formSpesa.attiva} onChange={e => setFormSpesa({...formSpesa, attiva: e.target.checked})} className="w-4 h-4" />
@@ -522,11 +524,17 @@ export default function ContabilitaPage() {
                     <CardContent className="p-3 flex items-center justify-between">
                       <div className="grid grid-cols-2 md:grid-cols-5 gap-2 flex-1 text-sm items-center">
                         <p className="font-semibold">{imm?.codice || '—'}</p>
-                        <Badge variant="outline" className="w-fit capitalize">{s.tipo}</Badge>
+                        <div className="flex items-center gap-1">
+                          <Badge variant="outline" className="w-fit capitalize">{s.tipo}</Badge>
+                          {s.autoKey && <Badge variant="secondary" className="text-[10px]">da immobile</Badge>}
+                        </div>
                         <p>{s.descrizione || '—'}</p>
                         <p>€{s.importo.toLocaleString('it-IT')} / <span className="text-muted-foreground capitalize">{s.periodicita}</span></p>
                         <p className="text-muted-foreground text-xs">€{annuo.toLocaleString('it-IT')} annui</p>
                       </div>
+                      {s.autoKey ? (
+                        <p className="text-xs text-muted-foreground max-w-[140px] text-right">Modifica l'importo dalla scheda immobile</p>
+                      ) : (
                       <div className="flex gap-1">
                         <Button variant="ghost" size="icon" onClick={() => {
                           setFormSpesa({ immobileId: s.immobileId, tipo: s.tipo, descrizione: s.descrizione, importo: s.importo, periodicita: s.periodicita, dataInizio: s.dataInizio, attiva: s.attiva, note: s.note });
@@ -536,6 +544,7 @@ export default function ContabilitaPage() {
                           <Trash2 className="w-4 h-4 text-destructive" />
                         </Button>
                       </div>
+                      )}
                     </CardContent>
                   </Card>
                 );

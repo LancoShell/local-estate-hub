@@ -10,6 +10,7 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Plus, Pencil, Trash2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
+import { canoneAdeguato, nomeProprietario } from '@/lib/calc';
 
 const statiContratto: StatoContratto[] = ['attivo', 'scaduto', 'disdetto'];
 
@@ -23,7 +24,7 @@ const emptyForm = {
   immobileId: '', inquilinoId: '', proprietarioId: '', dataInizio: '', dataFine: '',
   canone: 0, deposito: 0, tipoDeposito: 'cauzionale' as TipoDeposito, fidejussione: 0,
   stato: 'attivo' as StatoContratto, tipoCedolare: 'ordinario' as TipoCedolare,
-  aliquotaCedolare: 21, adeguamentoIstat: 0, pagamentiAutomatici: false, note: '',
+  aliquotaCedolare: 21, adeguamentoIstat: 0, quotaIstat: 75, speseRegistrazione: 0, pagamentiAutomatici: false, note: '',
 };
 
 const labelCedolare: Record<TipoCedolare, string> = {
@@ -55,7 +56,7 @@ export default function ContrattiPage() {
     if (form.inquilinoId) {
       const inq = data.inquilini.find(i => i.id === form.inquilinoId);
       if (inq?.tipoSoggetto === 'azienda' && form.tipoCedolare !== 'adeguamento_istat') {
-        setForm(f => ({ ...f, tipoCedolare: 'adeguamento_istat', adeguamentoIstat: f.adeguamentoIstat || 75 }));
+        setForm(f => ({ ...f, tipoCedolare: 'adeguamento_istat', }));
       }
     }
   }, [form.inquilinoId]);
@@ -89,6 +90,7 @@ export default function ContrattiPage() {
       tipoDeposito: c.tipoDeposito || 'cauzionale', fidejussione: c.fidejussione || 0,
       stato: c.stato, tipoCedolare: c.tipoCedolare || 'ordinario',
       aliquotaCedolare: c.aliquotaCedolare || 21, adeguamentoIstat: c.adeguamentoIstat || 0,
+      quotaIstat: c.quotaIstat ?? 75, speseRegistrazione: c.speseRegistrazione || 0,
       pagamentiAutomatici: c.pagamentiAutomatici || false, note: c.note,
     });
     setEditing(c.id); setOpen(true);
@@ -139,7 +141,7 @@ export default function ContrattiPage() {
               <div><Label>Proprietario</Label>
                 <Select value={form.proprietarioId} onValueChange={v => setForm({...form, proprietarioId: v})}>
                   <SelectTrigger><SelectValue placeholder="Seleziona" /></SelectTrigger>
-                  <SelectContent>{data.proprietari.map(p => <SelectItem key={p.id} value={p.id}>{p.nome} {p.cognome}</SelectItem>)}</SelectContent>
+                  <SelectContent>{data.proprietari.map(p => <SelectItem key={p.id} value={p.id}>{nomeProprietario(p)}</SelectItem>)}</SelectContent>
                 </Select>
               </div>
               <div><Label>Stato</Label>
@@ -167,8 +169,20 @@ export default function ContrattiPage() {
                 </Select>
               </div>
 
-              {(form.tipoCedolare === 'adeguamento_istat') && (
-                <div><Label>Adeguamento ISTAT % (es. 75)</Label><Input type="number" step="0.1" value={form.adeguamentoIstat} onChange={e => setForm({...form, adeguamentoIstat: +e.target.value})} /></div>
+              {form.tipoCedolare !== 'cedolare_secca' && (
+                <>
+                  <div><Label>Variazione ISTAT annua %</Label><Input type="number" step="0.1" value={form.adeguamentoIstat} onChange={e => setForm({...form, adeguamentoIstat: parseFloat(e.target.value) || 0})} /></div>
+                  <div><Label>Quota applicata % (di norma 75)</Label><Input type="number" step="1" value={form.quotaIstat} onChange={e => setForm({...form, quotaIstat: parseFloat(e.target.value) || 0})} /></div>
+                  {form.canone > 0 && form.adeguamentoIstat > 0 && (
+                    <div className="col-span-2 text-xs p-2 bg-muted/30 rounded">
+                      Aumento applicato: <strong>{(form.adeguamentoIstat * form.quotaIstat / 100).toFixed(2)}%</strong> → canone adeguato <strong>€{canoneAdeguato(form).toLocaleString('it-IT', { minimumFractionDigits: 2 })}</strong>/mese
+                      (le rate non ancora pagate vengono aggiornate al salvataggio)
+                    </div>
+                  )}
+                </>
+              )}
+              {form.tipoCedolare === 'cedolare_secca' && (
+                <div className="col-span-2 text-xs text-muted-foreground p-2 bg-muted/20 rounded">Con la cedolare secca il locatore rinuncia all'aggiornamento ISTAT del canone.</div>
               )}
 
               {/* Deposito */}
@@ -184,10 +198,18 @@ export default function ContrattiPage() {
                 </Select>
               </div>
               {form.tipoDeposito !== 'nessuno' && (
-                <div><Label>Importo Deposito/Fidejussione €</Label><Input type="number" value={form.deposito} onChange={e => setForm({...form, deposito: +e.target.value})} /></div>
+                <div><Label>Importo Deposito/Fidejussione € (registrato in Contabilità)</Label><Input type="number" value={form.deposito} onChange={e => setForm({...form, deposito: +e.target.value})} /></div>
               )}
               {(form.tipoDeposito === 'fidejussione_affitto') && (
                 <div><Label>Fidejussione Affitto € (garanzia)</Label><Input type="number" value={form.fidejussione} onChange={e => setForm({...form, fidejussione: +e.target.value})} /></div>
+              )}
+
+              {/* Spese di registrazione */}
+              <div><Label>Spese di registrazione € (totale)</Label><Input type="number" value={form.speseRegistrazione} onChange={e => setForm({...form, speseRegistrazione: parseFloat(e.target.value) || 0})} /></div>
+              {form.speseRegistrazione > 0 && (
+                <div className="text-xs text-muted-foreground self-end pb-2">
+                  50% a carico dell'inquilino: <strong>€{(form.speseRegistrazione / 2).toLocaleString('it-IT')}</strong>, inserito tra le rate (scadenza +30 gg).
+                </div>
               )}
 
               {/* Pagamenti automatici */}
@@ -233,7 +255,7 @@ export default function ContrattiPage() {
             const prop = getProprietario(c.proprietarioId);
             const isAzienda = inq?.tipoSoggetto === 'azienda';
             const nomeInq = isAzienda ? inq?.ragioneSociale : (inq ? `${inq.nome} ${inq.cognome}` : 'N/A');
-            const canoneAdeguato = c.canone * (1 + (c.adeguamentoIstat || 0) / 100);
+            const canoneAdeg = canoneAdeguato(c);
             const pagamentiContratto = data.pagamenti.filter(p => p.contrattoId === c.id);
             const insoluti = pagamentiContratto.filter(p => p.stato === 'insoluto').length;
             return (
@@ -248,11 +270,12 @@ export default function ContrattiPage() {
                       <div>
                         <p className="text-sm">{nomeInq || 'N/A'}</p>
                         {isAzienda && <Badge variant="outline" className="text-xs mt-0.5">Azienda</Badge>}
-                        <p className="text-xs text-muted-foreground">{prop ? `${prop.nome} ${prop.cognome}` : ''}</p>
+                        <p className="text-xs text-muted-foreground">{prop ? nomeProprietario(prop) : ''}</p>
                       </div>
                       <div>
                         <p className="text-xs text-muted-foreground">{c.dataInizio} → {c.dataFine || '∞'}</p>
-                        <p className="text-sm font-medium">€{canoneAdeguato.toFixed(0)}/mese</p>
+                        <p className="text-sm font-medium">€{canoneAdeg.toLocaleString('it-IT', { maximumFractionDigits: 2 })}/mese</p>
+                        {canoneAdeg !== c.canone && <p className="text-xs text-muted-foreground">base €{c.canone.toLocaleString('it-IT')} + ISTAT</p>}
                         <p className="text-xs text-muted-foreground">{labelCedolare[c.tipoCedolare || 'ordinario']}</p>
                       </div>
                       <div>

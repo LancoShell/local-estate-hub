@@ -1,13 +1,13 @@
 export type StatoImmobile = 'libero' | 'affittato' | 'manutenzione';
 export type ClasseEnergetica = 'A4' | 'A3' | 'A2' | 'A1' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G';
-export type TipologiaImmobile = 'appartamento' | 'villa' | 'ufficio' | 'negozio' | 'magazzino' | 'box' | 'altro';
+export type TipologiaImmobile = 'appartamento' | 'villa' | 'ufficio' | 'negozio' | 'magazzino' | 'box' | 'cantina' | 'altro';
 export type StatoPagamento = 'pagato' | 'parziale' | 'insoluto' | 'attesa';
 export type StatoContratto = 'attivo' | 'scaduto' | 'disdetto';
 export type StatoManutenzione = 'aperta' | 'in_corso' | 'completata';
 export type TipoSoggetto = 'persona_fisica' | 'azienda';
 export type TipoCedolare = 'cedolare_secca' | 'cedolare_concordato' | 'adeguamento_istat' | 'ordinario';
 export type TipoDeposito = 'cauzionale' | 'fidejussione_danni' | 'fidejussione_affitto' | 'nessuno';
-export type TipoPagamento = 'canone' | 'deposito' | 'fidejussione' | 'imu' | 'tari' | 'bolletta' | 'condominio' | 'manutenzione' | 'altro';
+export type TipoPagamento = 'canone' | 'deposito' | 'fidejussione' | 'registrazione' | 'imu' | 'tari' | 'bolletta' | 'condominio' | 'manutenzione' | 'altro';
 export type TipoSpesa = 'imu' | 'tari' | 'bolletta' | 'condominio' | 'bonifica' | 'altro';
 export type PeriodicitaSpesa = 'mensile' | 'trimestrale' | 'semestrale' | 'annuale';
 export type TipologiaManutenzione = 'caldaia' | 'filtri' | 'caditoie' | 'serramenti' | 'siliconature' | 'bascula' | 'altro';
@@ -45,13 +45,18 @@ export interface Immobile {
   allegati: Allegato[];
   note: string;
   proprietarioId: string;
+  immobilePrincipaleId?: string; // se valorizzato, è una pertinenza (garage/cantina)
   createdAt: string;
 }
 
 export interface Proprietario {
   id: string;
+  tipoSoggetto: TipoSoggetto;
   nome: string;
   cognome: string;
+  ragioneSociale: string;
+  partitaIva: string;
+  pec: string;
   codiceFiscale: string;
   email: string;
   telefono: string;
@@ -94,7 +99,9 @@ export interface Contratto {
   stato: StatoContratto;
   tipoCedolare: TipoCedolare;
   aliquotaCedolare: number;
-  adeguamentoIstat: number;
+  adeguamentoIstat: number; // variazione ISTAT annua % (indice FOI)
+  quotaIstat: number; // % della variazione ISTAT applicata al canone (di norma 75)
+  speseRegistrazione: number; // totale imposta di registro, 50% a carico dell'inquilino
   pagamentiAutomatici: boolean;
   note: string;
   createdAt: string;
@@ -112,6 +119,7 @@ export interface Pagamento {
   isDeposito: boolean;
   meseRiferimento: string;
   mora: number;
+  autoKey?: 'deposito' | 'registrazione'; // generato automaticamente dal contratto
   note: string;
   createdAt: string;
 }
@@ -142,6 +150,7 @@ export interface SpesaFissa {
   periodicita: PeriodicitaSpesa;
   dataInizio: string;
   attiva: boolean;
+  autoKey?: 'imu' | 'tari' | 'bollette'; // generata dai valori dell'immobile
   note: string;
   createdAt: string;
 }

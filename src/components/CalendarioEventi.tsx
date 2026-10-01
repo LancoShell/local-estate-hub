@@ -3,6 +3,7 @@ import { useData } from '@/contexts/DataContext';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { moraAttuale, parseData } from '@/lib/calc';
 
 interface CalEvent {
   data: string;
@@ -40,10 +41,13 @@ export default function CalendarioEventi() {
 
   data.pagamenti.forEach(p => {
     if (!p.dataScadenza) return;
+    const c = data.contratti.find(x => x.id === p.contrattoId);
+    const codice = data.immobili.find(i => i.id === c?.immobileId)?.codice || '';
+    const nome = `${p.tipoPagamento}${codice ? ' ' + codice : ''}`;
     if (p.stato === 'insoluto') {
-      events.push({ data: p.dataScadenza, tipo: 'pagamento_scaduto', label: `Insoluto: €${p.importoDovuto}` });
+      events.push({ data: p.dataScadenza, tipo: 'pagamento_scaduto', label: `Insoluto ${nome}: €${(p.importoDovuto + moraAttuale(p)).toLocaleString('it-IT')}` });
     } else if (p.stato === 'attesa') {
-      events.push({ data: p.dataScadenza, tipo: 'pagamento_attesa', label: `Scadenza: €${p.importoDovuto}` });
+      events.push({ data: p.dataScadenza, tipo: 'pagamento_attesa', label: `Scadenza ${nome}: €${p.importoDovuto.toLocaleString('it-IT')}` });
     }
   });
 
@@ -61,7 +65,7 @@ export default function CalendarioEventi() {
   // Scadenze IMU, TARI e altre spese fisse per il mese visualizzato
   const periodicityMonths: Record<string, number> = { mensile: 1, trimestrale: 3, semestrale: 6, annuale: 12 };
   data.speseFisse.filter(s => s.attiva && s.dataInizio).forEach(s => {
-    const inizio = new Date(s.dataInizio);
+    const inizio = parseData(s.dataInizio);
     const diffMesi = (anno - inizio.getFullYear()) * 12 + (mese - inizio.getMonth());
     if (diffMesi < 0) return;
     const mult = periodicityMonths[s.periodicita] ?? 1;

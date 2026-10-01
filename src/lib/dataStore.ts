@@ -31,11 +31,21 @@ export function loadData(): AppData {
         tipoSoggetto: 'persona_fisica' as const, ragioneSociale: '', partitaIva: '', pec: '',
         ...i,
       })),
-      contratti: (stored.contratti ?? []).map(c => ({
-        tipoCedolare: 'ordinario' as const, aliquotaCedolare: 21, tipoDeposito: 'cauzionale' as const,
-        fidejussione: 0, pagamentiAutomatici: false,
-        ...c,
+      proprietari: (stored.proprietari ?? []).map(p => ({
+        tipoSoggetto: 'persona_fisica' as const, ragioneSociale: '', partitaIva: '', pec: '',
+        ...p,
       })),
+      contratti: (stored.contratti ?? []).map(c => {
+        const migrated = {
+          tipoCedolare: 'ordinario' as const, aliquotaCedolare: 21, tipoDeposito: 'cauzionale' as const,
+          fidejussione: 0, pagamentiAutomatici: false, speseRegistrazione: 0,
+          ...c,
+          quotaIstat: c.quotaIstat ?? 75,
+        };
+        // Vecchio default errato: "75" era salvato come variazione ISTAT e applicato come +75% sul canone
+        if (c.quotaIstat === undefined && c.adeguamentoIstat === 75) migrated.adeguamentoIstat = 0;
+        return migrated;
+      }),
       pagamenti: (stored.pagamenti ?? []).map(p => ({
         tipoPagamento: 'canone' as const, isDeposito: false, meseRiferimento: '',
         ...p,

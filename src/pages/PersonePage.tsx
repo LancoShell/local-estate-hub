@@ -11,9 +11,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Badge } from '@/components/ui/badge';
 import { Plus, Search, Pencil, Trash2, Building2, User } from 'lucide-react';
 import { toast } from 'sonner';
+import { nomeProprietario } from '@/lib/calc';
 
 const emptyProp = {
-  nome: '', cognome: '', codiceFiscale: '', email: '', telefono: '',
+  tipoSoggetto: 'persona_fisica' as TipoSoggetto, nome: '', cognome: '',
+  ragioneSociale: '', partitaIva: '', pec: '', codiceFiscale: '', email: '', telefono: '',
   indirizzo: '', iban: '', percentualeProprietà: 100, note: '',
 };
 
@@ -42,14 +44,15 @@ export default function PersonePage() {
   const [formContratto, setFormContratto] = useState(emptyContrattoOpt);
 
   const filteredProp = data.proprietari.filter(p =>
-    `${p.nome} ${p.cognome} ${p.email}`.toLowerCase().includes(search.toLowerCase())
+    `${p.nome} ${p.cognome} ${p.ragioneSociale || ''} ${p.email}`.toLowerCase().includes(search.toLowerCase())
   );
   const filteredInq = data.inquilini.filter(i =>
     `${i.nome} ${i.cognome} ${i.ragioneSociale} ${i.email}`.toLowerCase().includes(search.toLowerCase())
   );
 
   const saveProp = () => {
-    if (!formProp.nome || !formProp.cognome) { toast.error('Nome e cognome obbligatori'); return; }
+    if (formProp.tipoSoggetto === 'persona_fisica' && (!formProp.nome || !formProp.cognome)) { toast.error('Nome e cognome obbligatori'); return; }
+    if (formProp.tipoSoggetto === 'azienda' && !formProp.ragioneSociale) { toast.error('Ragione sociale obbligatoria'); return; }
     if (editingProp) { updateProprietario(editingProp, formProp); toast.success('Aggiornato'); }
     else { addProprietario(formProp); toast.success('Proprietario aggiunto'); }
     setFormProp(emptyProp); setEditingProp(null); setOpenProp(false);
@@ -92,7 +95,9 @@ export default function PersonePage() {
         stato: 'attivo',
         tipoCedolare: isAzienda ? 'adeguamento_istat' : formContratto.tipoCedolare,
         aliquotaCedolare: 21,
-        adeguamentoIstat: isAzienda ? (formContratto.adeguamentoIstat || 75) : formContratto.adeguamentoIstat,
+        adeguamentoIstat: formContratto.adeguamentoIstat,
+        quotaIstat: 75,
+        speseRegistrazione: 0,
         pagamentiAutomatici: false,
         note: 'Contratto creato automaticamente',
       });
@@ -112,10 +117,13 @@ export default function PersonePage() {
         <CardContent className="p-4 flex items-center justify-between">
           <div className="flex items-center gap-3 flex-1 min-w-0">
             <div className="w-9 h-9 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
-              <User className="w-4 h-4 text-primary" />
+              {p.tipoSoggetto === 'azienda' ? <Building2 className="w-4 h-4 text-primary" /> : <User className="w-4 h-4 text-primary" />}
             </div>
             <div className="min-w-0">
-              <p className="font-display font-semibold text-sm">{p.nome} {p.cognome}</p>
+              <div className="flex items-center gap-2">
+                <p className="font-display font-semibold text-sm">{nomeProprietario(p)}</p>
+                <Badge variant="outline" className="text-xs">{p.tipoSoggetto === 'azienda' ? 'Azienda' : 'Persona fisica'}</Badge>
+              </div>
               <p className="text-xs text-muted-foreground">{p.email} · {p.telefono}</p>
               <p className="text-xs text-muted-foreground">{suoi.length} immobili</p>
             </div>
@@ -123,7 +131,7 @@ export default function PersonePage() {
           <div className="flex gap-1">
             <Button variant="ghost" size="icon" onClick={() => {
               const full = data.proprietari.find(x => x.id === p.id)!;
-              setFormProp({ nome: full.nome, cognome: full.cognome, codiceFiscale: full.codiceFiscale, email: full.email, telefono: full.telefono, indirizzo: full.indirizzo, iban: full.iban, percentualeProprietà: full.percentualeProprietà, note: full.note });
+              setFormProp({ tipoSoggetto: full.tipoSoggetto || 'persona_fisica', nome: full.nome, cognome: full.cognome, ragioneSociale: full.ragioneSociale || '', partitaIva: full.partitaIva || '', pec: full.pec || '', codiceFiscale: full.codiceFiscale, email: full.email, telefono: full.telefono, indirizzo: full.indirizzo, iban: full.iban, percentualeProprietà: full.percentualeProprietà, note: full.note });
               setEditingProp(p.id); setOpenProp(true);
             }}><Pencil className="w-4 h-4" /></Button>
             <Button variant="ghost" size="icon" onClick={() => { deleteProprietario(p.id); toast.success('Eliminato'); }}>
@@ -194,9 +202,30 @@ export default function PersonePage() {
               <DialogTrigger asChild><Button size="sm"><Plus className="w-4 h-4 mr-2" />Nuovo Proprietario</Button></DialogTrigger>
               <DialogContent>
                 <DialogHeader><DialogTitle className="font-display">{editingProp ? 'Modifica' : 'Nuovo'} Proprietario</DialogTitle></DialogHeader>
+                <div className="mt-3">
+                  <Label>Tipo Soggetto</Label>
+                  <div className="flex gap-2 mt-1">
+                    {(['persona_fisica', 'azienda'] as TipoSoggetto[]).map(tipo => (
+                      <Button key={tipo} variant={formProp.tipoSoggetto === tipo ? 'default' : 'outline'} size="sm"
+                        onClick={() => setFormProp({ ...formProp, tipoSoggetto: tipo })}>
+                        {tipo === 'persona_fisica' ? <><User className="w-3 h-3 mr-1" />Persona Fisica</> : <><Building2 className="w-3 h-3 mr-1" />Azienda</>}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
                 <div className="grid grid-cols-2 gap-3 mt-3">
-                  <div><Label>Nome *</Label><Input value={formProp.nome} onChange={e => setFormProp({...formProp, nome: e.target.value})} /></div>
-                  <div><Label>Cognome *</Label><Input value={formProp.cognome} onChange={e => setFormProp({...formProp, cognome: e.target.value})} /></div>
+                  {formProp.tipoSoggetto === 'azienda' ? (
+                    <>
+                      <div className="col-span-2"><Label>Ragione Sociale *</Label><Input value={formProp.ragioneSociale} onChange={e => setFormProp({...formProp, ragioneSociale: e.target.value})} /></div>
+                      <div><Label>Partita IVA</Label><Input value={formProp.partitaIva} onChange={e => setFormProp({...formProp, partitaIva: e.target.value})} /></div>
+                      <div><Label>PEC</Label><Input value={formProp.pec} onChange={e => setFormProp({...formProp, pec: e.target.value})} /></div>
+                    </>
+                  ) : (
+                    <>
+                      <div><Label>Nome *</Label><Input value={formProp.nome} onChange={e => setFormProp({...formProp, nome: e.target.value})} /></div>
+                      <div><Label>Cognome *</Label><Input value={formProp.cognome} onChange={e => setFormProp({...formProp, cognome: e.target.value})} /></div>
+                    </>
+                  )}
                   <div><Label>Codice Fiscale</Label><Input value={formProp.codiceFiscale} onChange={e => setFormProp({...formProp, codiceFiscale: e.target.value})} /></div>
                   <div><Label>Email</Label><Input value={formProp.email} onChange={e => setFormProp({...formProp, email: e.target.value})} /></div>
                   <div><Label>Telefono</Label><Input value={formProp.telefono} onChange={e => setFormProp({...formProp, telefono: e.target.value})} /></div>
