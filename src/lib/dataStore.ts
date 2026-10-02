@@ -24,8 +24,12 @@ export function loadData(): AppData {
       ...stored,
       speseFisse: stored.speseFisse ?? [],
       immobili: (stored.immobili ?? []).map(i => ({
-        valoreAcquisto: 0, valoreAttuale: 0, imu: 0, tari: 0, bollette: 0, speseBonifica: 0, allegati: [],
+        valoreAcquisto: 0, valoreAttuale: 0, imu: 0, tari: 0, bollette: 0, speseBonifica: 0, allegati: [], pertinenzaDi: '',
         ...i,
+      })),
+      proprietari: (stored.proprietari ?? []).map(p => ({
+        tipoSoggetto: 'persona_fisica' as const, ragioneSociale: '', partitaIva: '',
+        ...p,
       })),
       inquilini: (stored.inquilini ?? []).map(i => ({
         tipoSoggetto: 'persona_fisica' as const, ragioneSociale: '', partitaIva: '', pec: '',
@@ -33,7 +37,7 @@ export function loadData(): AppData {
       })),
       contratti: (stored.contratti ?? []).map(c => ({
         tipoCedolare: 'ordinario' as const, aliquotaCedolare: 21, tipoDeposito: 'cauzionale' as const,
-        fidejussione: 0, pagamentiAutomatici: false,
+        fidejussione: 0, pagamentiAutomatici: false, speseRegistrazione: 0, adeguamentoIstat: 0,
         ...c,
       })),
       pagamenti: (stored.pagamenti ?? []).map(p => ({

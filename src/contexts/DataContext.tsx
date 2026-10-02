@@ -1,9 +1,10 @@
-import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
 import {
   AppData, Immobile, Proprietario, Inquilino, Contratto, Pagamento,
   Manutenzione, Lead, SpesaFissa, StatoPagamento, TipologiaManutenzione, PeriodicitaManutenzione,
 } from '@/lib/types';
 import { loadData, saveData, generateId } from '@/lib/dataStore';
+import { calcolaMora, canoneEffettivo, moraApplicabile } from '@/lib/finance';
 
 const MANUTENZIONI_AUTO: Array<{ tipologia: TipologiaManutenzione; descrizione: string; periodicita: PeriodicitaManutenzione; mesi: number }> = [
   { tipologia: 'caldaia', descrizione: 'Revisione annuale caldaia', periodicita: 'annuale', mesi: 12 },
@@ -18,7 +19,7 @@ interface DataContextType {
   data: AppData;
   refresh: () => void;
   // Immobili
-  addImmobile: (item: Omit<Immobile, 'id' | 'createdAt'>) => void;
+  addImmobile: (item: Omit<Immobile, 'id' | 'createdAt'>) => Immobile;
   updateImmobile: (id: string, item: Partial<Immobile>) => void;
   deleteImmobile: (id: string) => void;
   // Proprietari
@@ -55,98 +56,242 @@ interface DataContextType {
 
 const DataContext = createContext<DataContextType | null>(null);
 
-function calcolaMoraGiorni(importoDovuto: number, giorni: number): number {
-  return Math.round(importoDovuto * 0.02 * (giorni / 30));
+// Immobile + sue pertinenze (garage/cantina collegati)
+function gruppoImmobile(immobili: Immobile[], immobileId: string): Set<string> {
+  const ids = new Set<string>([immobileId]);
+  immobili.forEach(i => { if (i.pertinenzaDi === immobileId) ids.add(i.id); });
+  return ids;
+}
+
+const annoCorrente = () => new Date().getFullYear();
+
+// Allinea le spese fisse IMU/TARI all'immobile (2 rate semestrali, date modificabili in Contabilità)
+function syncSpeseImmobile(d: AppData, immobileId: string, soloMancanti = false): AppData {
+  const imm = d.immobili.find(i => i.id === immobileId);
+  if (!imm) return d;
+  let spese = d.speseFisse;
+  const config = [
+    { tipo: 'imu' as const, annuo: imm.imu || 0, inizio: `${annoCorrente()}-06-16`, label: 'IMU' },
+    { tipo: 'tari' as const, annuo: imm.tari || 0, inizio: `${annoCorrente()}-06-30`, label: 'TARI' },
+  ];
+  for (const { tipo, annuo, inizio, label } of config) {
+    const collegata = spese.find(s => s.immobileId === immobileId && s.tipo === tipo && s.origine === 'immobile');
+    if (soloMancanti) {
+      if (annuo > 0 && !spese.some(s => s.immobileId === immobileId && s.tipo === tipo)) {
+        spese = [...spese, {
+          id: generateId(), immobileId, tipo, descrizione: `${label} annua €${annuo} (2 rate)`, importo: annuo / 2,
+          periodicita: 'semestrale', dataInizio: inizio, attiva: true, origine: 'immobile', note: '', createdAt: new Date().toISOString(),
+        }];
+      }
+      continue;
+    }
+    if (annuo > 0) {
+      const rata = Math.round((annuo / 2) * 100) / 100;
+      if (collegata) {
+        spese = spese.map(s => s.id === collegata.id
+          ? { ...s, importo: rata, periodicita: 'semestrale', attiva: true, descrizione: `${label} annua €${annuo} (2 rate)` }
+          : s);
+      } else {
+        spese = [...spese, {
+          id: generateId(), immobileId, tipo, descrizione: `${label} annua €${annuo} (2 rate)`, importo: rata,
+          periodicita: 'semestrale', dataInizio: inizio, attiva: true, origine: 'immobile', note: '', createdAt: new Date().toISOString(),
+        }];
+      }
+    } else if (collegata) {
+      spese = spese.filter(s => s.id !== collegata.id);
+    }
+  }
+  return spese === d.speseFisse ? d : { ...d, speseFisse: spese };
+}
+
+// Allinea tutto ciò che deriva dal contratto: canone sull'immobile, rate non pagate,
+// deposito e spese di registrazione (metà a carico inquilino)
+function syncContratto(d: AppData, contrattoId: string): AppData {
+  const c = d.contratti.find(x => x.id === contrattoId);
+  if (!c) return d;
+  const now = new Date();
+  const canone = canoneEffettivo(c);
+  let pagamenti = d.pagamenti.map(p => {
+    if (p.contrattoId !== c.id || p.tipoPagamento !== 'canone' || (p.stato !== 'attesa' && p.stato !== 'insoluto')) return p;
+    return { ...p, importoDovuto: canone, mora: p.stato === 'insoluto' ? calcolaMora(canone, p.dataScadenza, now) : 0 };
+  });
+
+  const upsertAuto = (origine: 'deposito' | 'registrazione', importo: number, build: () => Pagamento) => {
+    const esistente = pagamenti.find(p => p.contrattoId === c.id && p.origine === origine);
+    if (importo > 0) {
+      if (!esistente) pagamenti = [...pagamenti, build()];
+      else if (esistente.stato !== 'pagato' || origine === 'deposito') {
+        const nuovo = build();
+        pagamenti = pagamenti.map(p => p.id === esistente.id
+          ? { ...p, tipoPagamento: nuovo.tipoPagamento, importoDovuto: nuovo.importoDovuto, importo: origine === 'deposito' ? nuovo.importo : p.importo, dataScadenza: nuovo.dataScadenza }
+          : p);
+      }
+    } else if (esistente) {
+      pagamenti = pagamenti.filter(p => p.id !== esistente.id);
+    }
+  };
+
+  const depositoAttivo = c.tipoDeposito !== 'nessuno' && c.deposito > 0;
+  upsertAuto('deposito', depositoAttivo ? c.deposito : 0, () => ({
+    id: generateId(), contrattoId: c.id,
+    tipoPagamento: c.tipoDeposito === 'cauzionale' ? 'deposito' : 'fidejussione',
+    importo: c.deposito, importoDovuto: c.deposito, dataPagamento: c.dataInizio, dataScadenza: c.dataInizio,
+    stato: 'pagato', isDeposito: true, meseRiferimento: c.dataInizio.slice(0, 7), mora: 0, origine: 'deposito',
+    note: 'Generato dal contratto', createdAt: now.toISOString(),
+  }));
+
+  const metaRegistrazione = Math.round(((c.speseRegistrazione || 0) / 2) * 100) / 100;
+  upsertAuto('registrazione', metaRegistrazione, () => ({
+    id: generateId(), contrattoId: c.id, tipoPagamento: 'registrazione',
+    importo: 0, importoDovuto: metaRegistrazione, dataPagamento: '', dataScadenza: c.dataInizio,
+    stato: 'attesa', isDeposito: false, meseRiferimento: c.dataInizio.slice(0, 7), mora: 0, origine: 'registrazione',
+    note: `50% spese di registrazione (totale €${c.speseRegistrazione})`, createdAt: now.toISOString(),
+  }));
+
+  let immobili = d.immobili;
+  if (c.stato === 'attivo') {
+    immobili = immobili.map(i => i.id === c.immobileId ? { ...i, prezzoRichiesto: canone } : i);
+  }
+  return { ...d, pagamenti, immobili };
 }
 
 export function DataProvider({ children }: { children: React.ReactNode }) {
   const [data, setData] = useState<AppData>(loadData);
+  // Ref always holds the latest data so sequential mutations don't overwrite each other
+  const dataRef = useRef<AppData>(data);
 
   const persist = useCallback((newData: AppData) => {
+    dataRef.current = newData;
     setData(newData);
     saveData(newData);
   }, []);
 
-  const refresh = useCallback(() => setData(loadData()), []);
+  const refresh = useCallback(() => {
+    const loaded = loadData();
+    dataRef.current = loaded;
+    setData(loaded);
+  }, []);
 
-  // Auto-aggiorna pagamenti scaduti (attesa → insoluto) al caricamento
+  // Al caricamento: attesa → insoluto se scaduti, mora degli insoluti aggiornata a oggi,
+  // IMU/TARI già presenti sugli immobili ma senza spesa fissa collegata
   useEffect(() => {
     const now = new Date();
     let hasChanges = false;
     const updatedPagamenti = data.pagamenti.map(p => {
       if (p.stato === 'attesa' && p.dataScadenza && new Date(p.dataScadenza) < now) {
-        const diffDays = Math.floor((now.getTime() - new Date(p.dataScadenza).getTime()) / 86400000);
-        const mora = calcolaMoraGiorni(p.importoDovuto, diffDays);
         hasChanges = true;
-        return { ...p, stato: 'insoluto' as StatoPagamento, mora };
+        return { ...p, stato: 'insoluto' as StatoPagamento, mora: moraApplicabile(p) ? calcolaMora(p.importoDovuto, p.dataScadenza, now) : 0 };
+      }
+      if (p.stato === 'insoluto' && moraApplicabile(p)) {
+        const mora = calcolaMora(p.importoDovuto, p.dataScadenza, now);
+        if (mora !== p.mora) { hasChanges = true; return { ...p, mora }; }
       }
       return p;
     });
-    if (hasChanges) {
-      const newData = { ...data, pagamenti: updatedPagamenti };
-      setData(newData);
-      saveData(newData);
-    }
+    let newData: AppData = { ...data, pagamenti: updatedPagamenti };
+    data.immobili.forEach(i => { newData = syncSpeseImmobile(newData, i.id, true); });
+    // Canone degli immobili affittati ancora vuoto: lo prende dal contratto attivo
+    const immobiliAllineati = newData.immobili.map(i => {
+      const att = newData.contratti.find(c => c.immobileId === i.id && c.stato === 'attivo');
+      return att && !i.prezzoRichiesto ? { ...i, prezzoRichiesto: canoneEffettivo(att) } : i;
+    });
+    if (immobiliAllineati.some((i, k) => i !== newData.immobili[k])) { newData = { ...newData, immobili: immobiliAllineati }; hasChanges = true; }
+    if (hasChanges || newData.speseFisse !== data.speseFisse) persist(newData);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const makeAdd = (key: keyof AppData) =>
     (item: Record<string, unknown>) => {
+      const current = dataRef.current;
       const newItem = { ...item, id: generateId(), createdAt: new Date().toISOString() };
-      const arr = data[key] as unknown[];
-      const newData = { ...data, [key]: [...arr, newItem] };
+      const arr = current[key] as unknown[];
+      const newData = { ...current, [key]: [...arr, newItem] };
       persist(newData);
       return newItem;
     };
 
   const makeUpdate = (key: keyof AppData) =>
     (id: string, updates: Record<string, unknown>) => {
-      const arr = data[key] as Array<{ id: string }>;
-      const newData = { ...data, [key]: arr.map(item => item.id === id ? { ...item, ...updates } : item) };
+      const current = dataRef.current;
+      const arr = current[key] as Array<{ id: string }>;
+      const newData = { ...current, [key]: arr.map(item => item.id === id ? { ...item, ...updates } : item) };
       persist(newData);
     };
 
   const makeDelete = (key: keyof AppData) =>
     (id: string) => {
-      const arr = data[key] as Array<{ id: string }>;
-      const newData = { ...data, [key]: arr.filter(item => item.id !== id) };
+      const current = dataRef.current;
+      const arr = current[key] as Array<{ id: string }>;
+      const newData = { ...current, [key]: arr.filter(item => item.id !== id) };
       persist(newData);
     };
 
+  const addImmobileFn = (item: Omit<Immobile, 'id' | 'createdAt'>): Immobile => {
+    const current = dataRef.current;
+    const newItem = { ...item, id: generateId(), createdAt: new Date().toISOString() } as Immobile;
+    persist(syncSpeseImmobile({ ...current, immobili: [...current.immobili, newItem] }, newItem.id));
+    return newItem;
+  };
+
+  const updateImmobileFn = (id: string, updates: Partial<Immobile>) => {
+    const current = dataRef.current;
+    const newData = { ...current, immobili: current.immobili.map(i => i.id === id ? { ...i, ...updates } : i) };
+    persist(syncSpeseImmobile(newData, id));
+  };
+
+  const deleteImmobileFn = (id: string) => {
+    const current = dataRef.current;
+    persist({
+      ...current,
+      immobili: current.immobili.filter(i => i.id !== id).map(i => i.pertinenzaDi === id ? { ...i, pertinenzaDi: '' } : i),
+      speseFisse: current.speseFisse.filter(s => !(s.immobileId === id && s.origine === 'immobile')),
+    });
+  };
+
+  const deleteContrattoFn = (id: string) => {
+    const current = dataRef.current;
+    persist({
+      ...current,
+      contratti: current.contratti.filter(c => c.id !== id),
+      pagamenti: current.pagamenti.filter(p => !(p.contrattoId === id && p.origine)),
+    });
+  };
+
   const addContrattoFn = (item: Omit<Contratto, 'id' | 'createdAt'>): Contratto => {
+    const current = dataRef.current;
     const newItem = { ...item, id: generateId(), createdAt: new Date().toISOString() } as Contratto;
-    // Aggiorna stato immobile ad 'affittato' se contratto attivo
+    const gruppo = gruppoImmobile(current.immobili, item.immobileId);
     const updatedImmobili = item.stato === 'attivo' && item.immobileId
-      ? data.immobili.map(i => i.id === item.immobileId ? { ...i, stato: 'affittato' as const } : i)
-      : data.immobili;
-    const newData = { ...data, contratti: [...data.contratti, newItem], immobili: updatedImmobili };
+      ? current.immobili.map(i => gruppo.has(i.id) ? { ...i, stato: 'affittato' as const } : i)
+      : current.immobili;
+    const newData = syncContratto({ ...current, contratti: [...current.contratti, newItem], immobili: updatedImmobili }, newItem.id);
     persist(newData);
 
-    // Genera pagamenti automatici se abilitati
     if (item.pagamentiAutomatici && item.stato === 'attivo') {
-      setTimeout(() => generaPagamentiContrattoInternal(newItem.id, newData), 0);
+      setTimeout(() => generaPagamentiContrattoInternal(newItem.id, dataRef.current), 0);
     }
     return newItem;
   };
 
   const updateContrattoFn = (id: string, updates: Partial<Contratto>) => {
-    const contratto = data.contratti.find(c => c.id === id);
+    const current = dataRef.current;
+    const contratto = current.contratti.find(c => c.id === id);
     if (!contratto) return;
     const updatedContratto = { ...contratto, ...updates };
-    // Aggiorna stato immobile se cambia stato contratto
-    let updatedImmobili = data.immobili;
+    let updatedImmobili = current.immobili;
     if (updates.stato !== undefined && updatedContratto.immobileId) {
-      updatedImmobili = data.immobili.map(i => {
-        if (i.id !== updatedContratto.immobileId) return i;
+      const gruppo = gruppoImmobile(current.immobili, updatedContratto.immobileId);
+      updatedImmobili = current.immobili.map(i => {
+        if (!gruppo.has(i.id)) return i;
         if (updates.stato === 'attivo') return { ...i, stato: 'affittato' as const };
-        const hasOtherActive = data.contratti.some(c => c.id !== id && c.immobileId === i.id && c.stato === 'attivo');
+        const hasOtherActive = current.contratti.some(c => c.id !== id && gruppo.has(c.immobileId) && c.stato === 'attivo');
         return hasOtherActive ? i : { ...i, stato: 'libero' as const };
       });
     }
-    const newData = {
-      ...data,
-      contratti: data.contratti.map(c => c.id === id ? updatedContratto : c),
+    const newData = syncContratto({
+      ...current,
+      contratti: current.contratti.map(c => c.id === id ? updatedContratto : c),
       immobili: updatedImmobili,
-    };
+    }, id);
     persist(newData);
   };
 
@@ -164,8 +309,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     const limit = end < maxDate ? end : maxDate;
 
     const nuoviPagamenti: Pagamento[] = [];
-    const current = new Date(start.getFullYear(), start.getMonth(), 1);
-    const canoneAdeguato = contratto.canone * (1 + (contratto.adeguamentoIstat || 0) / 100);
+    // Se il contratto inizia dopo il 5 (data scadenza canone), il primo pagamento spetta al mese successivo
+    const firstPayMonth = start.getDate() > 5
+      ? new Date(start.getFullYear(), start.getMonth() + 1, 1)
+      : new Date(start.getFullYear(), start.getMonth(), 1);
+    const current = new Date(firstPayMonth);
+    const canoneAdeguato = canoneEffettivo(contratto);
 
     while (current <= limit) {
       const meseRif = `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, '0')}`;
@@ -175,7 +324,6 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       if (!exists) {
         const dataScadenza = new Date(current.getFullYear(), current.getMonth(), 5);
         const isScaduto = dataScadenza < now;
-        const giorni = isScaduto ? Math.floor((now.getTime() - dataScadenza.getTime()) / 86400000) : 0;
         nuoviPagamenti.push({
           id: generateId(),
           contrattoId,
@@ -187,7 +335,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
           stato: isScaduto ? 'insoluto' : 'attesa',
           isDeposito: false,
           meseRiferimento: meseRif,
-          mora: isScaduto ? calcolaMoraGiorni(canoneAdeguato, giorni) : 0,
+          mora: isScaduto ? calcolaMora(canoneAdeguato, dataScadenza.toISOString().slice(0, 10), now) : 0,
           note: '',
           createdAt: new Date().toISOString(),
         });
@@ -203,22 +351,22 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   }
 
   const generaPagamentiContratto = useCallback((contrattoId: string): number => {
-    return generaPagamentiContrattoInternal(contrattoId, data);
-  }, [data]); // eslint-disable-line react-hooks/exhaustive-deps
+    return generaPagamentiContrattoInternal(contrattoId, dataRef.current);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const generaManutenzioniAutomatiche = useCallback((immobileId?: string): number => {
-    const target = immobileId ? data.immobili.filter(i => i.id === immobileId) : data.immobili;
+    const current = dataRef.current;
+    const target = immobileId ? current.immobili.filter(i => i.id === immobileId) : current.immobili;
     const nuove: Manutenzione[] = [];
     const now = new Date();
 
     for (const imm of target) {
       for (const tipo of MANUTENZIONI_AUTO) {
-        const pending = data.manutenzioni.find(
+        const pending = current.manutenzioni.find(
           m => m.immobileId === imm.id && m.tipologia === tipo.tipologia && m.stato !== 'completata' && m.isAutomatica
         );
         if (!pending) {
-          // Trova l'ultima completata per calcolare la prossima scadenza
-          const lastCompleted = data.manutenzioni
+          const lastCompleted = current.manutenzioni
             .filter(m => m.immobileId === imm.id && m.tipologia === tipo.tipologia && m.stato === 'completata' && m.isAutomatica)
             .sort((a, b) => b.dataCompletamento.localeCompare(a.dataCompletamento))[0];
 
@@ -240,7 +388,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
             isAutomatica: true,
             tecnico: '',
             costo: 0,
-            stato: dataScadenza < now ? 'aperta' : 'aperta',
+            stato: 'aperta',
             dataSegnalazione: now.toISOString().slice(0, 10),
             dataScadenza: dataScadenza.toISOString().slice(0, 10),
             dataCompletamento: '',
@@ -252,17 +400,18 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     }
 
     if (nuove.length > 0) {
-      const newData = { ...data, manutenzioni: [...data.manutenzioni, ...nuove] };
+      const newData = { ...current, manutenzioni: [...current.manutenzioni, ...nuove] };
       persist(newData);
     }
     return nuove.length;
-  }, [data, persist]);
+  }, [persist]);
 
   const updateManutenzioneConRinnovo = (id: string, updates: Partial<Manutenzione>) => {
-    const man = data.manutenzioni.find(m => m.id === id);
+    const current = dataRef.current;
+    const man = current.manutenzioni.find(m => m.id === id);
     const updated = { ...man, ...updates } as Manutenzione;
-    const arr = data.manutenzioni.map(m => m.id === id ? updated : m);
-    let newPagamenti = data.pagamenti;
+    const arr = current.manutenzioni.map(m => m.id === id ? updated : m);
+    let newPagamenti = current.pagamenti;
 
     // Se una manutenzione automatica viene completata, programma la prossima
     if (updates.stato === 'completata' && updated.isAutomatica) {
@@ -291,16 +440,16 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
-    const newData = { ...data, manutenzioni: arr, pagamenti: newPagamenti };
+    const newData = { ...current, manutenzioni: arr, pagamenti: newPagamenti };
     persist(newData);
   };
 
   const value: DataContextType = {
     data,
     refresh,
-    addImmobile: makeAdd('immobili') as any,
-    updateImmobile: makeUpdate('immobili') as any,
-    deleteImmobile: makeDelete('immobili'),
+    addImmobile: addImmobileFn,
+    updateImmobile: updateImmobileFn,
+    deleteImmobile: deleteImmobileFn,
     addProprietario: makeAdd('proprietari') as any,
     updateProprietario: makeUpdate('proprietari') as any,
     deleteProprietario: makeDelete('proprietari'),
@@ -309,7 +458,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     deleteInquilino: makeDelete('inquilini'),
     addContratto: addContrattoFn,
     updateContratto: updateContrattoFn,
-    deleteContratto: makeDelete('contratti'),
+    deleteContratto: deleteContrattoFn,
     addPagamento: makeAdd('pagamenti') as any,
     updatePagamento: makeUpdate('pagamenti') as any,
     deletePagamento: makeDelete('pagamenti'),
