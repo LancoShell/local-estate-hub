@@ -96,16 +96,6 @@ export default function ContrattiPage() {
     setEditing(c.id); setOpen(true);
   };
 
-  const stimaImposta = (canone: number, tipoCedolare: TipoCedolare, aliquota: number): number => {
-    const annuo = canone * 12;
-    switch (tipoCedolare) {
-      case 'cedolare_secca': return annuo * 0.21;
-      case 'cedolare_concordato': return annuo * 0.10;
-      case 'adeguamento_istat': return annuo * 0.21; // stima base
-      default: return annuo * 0.30; // IRPEF stima media
-    }
-  };
-
   const isAziendaInquilino = (inquilinoId: string) => {
     return data.inquilini.find(i => i.id === inquilinoId)?.tipoSoggetto === 'azienda';
   };
@@ -197,9 +187,6 @@ export default function ContrattiPage() {
 
               <div><Label>Spese di Registrazione € (totale)</Label>
                 <Input type="number" value={form.speseRegistrazione} onChange={e => setForm({...form, speseRegistrazione: +e.target.value})} />
-                {form.speseRegistrazione > 0 && (
-                  <p className="text-xs text-muted-foreground mt-1">€{(form.speseRegistrazione / 2).toLocaleString('it-IT')} a carico inquilino (rata in Contabilità), €{(form.speseRegistrazione / 2).toLocaleString('it-IT')} a carico proprietario</p>
-                )}
               </div>
 
               {/* Pagamenti automatici */}
@@ -211,13 +198,12 @@ export default function ContrattiPage() {
                 </label>
               </div>
 
-              {/* Stima fiscale */}
-              {form.canone > 0 && (
+              {/* Spese di registrazione */}
+              {form.speseRegistrazione > 0 && (
                 <div className="col-span-2 p-3 bg-muted/20 rounded-md text-sm space-y-1">
-                  <p className="font-medium">Stima fiscale annua:</p>
-                  <p>Canone annuo: <strong>€{(form.canone * 12).toLocaleString('it-IT')}</strong></p>
-                  <p>Imposta stimata ({labelCedolare[form.tipoCedolare]}): <strong className="text-destructive">€{stimaImposta(form.canone, form.tipoCedolare, form.aliquotaCedolare).toLocaleString('it-IT', { maximumFractionDigits: 0 })}</strong></p>
-                  <p>Netto stimato: <strong className="text-success">€{(form.canone * 12 - stimaImposta(form.canone, form.tipoCedolare, form.aliquotaCedolare)).toLocaleString('it-IT', { maximumFractionDigits: 0 })}</strong></p>
+                  <p className="font-medium">Spese di registrazione contratto:</p>
+                  <p>Totale: <strong>€{form.speseRegistrazione.toLocaleString('it-IT')}</strong></p>
+                  <p>A carico inquilino (50%): <strong>€{(form.speseRegistrazione / 2).toLocaleString('it-IT')}</strong> · A carico proprietario (50%): <strong className="text-destructive">€{(form.speseRegistrazione / 2).toLocaleString('it-IT')}</strong></p>
                 </div>
               )}
 

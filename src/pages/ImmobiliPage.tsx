@@ -29,6 +29,7 @@ const emptyForm = {
   mq: 0, vani: 0, stato: 'libero' as StatoImmobile, classeEnergetica: 'G' as ClasseEnergetica,
   datiCatastali: '', prezzoRichiesto: 0, speseCondominiali: 0,
   valoreAcquisto: 0, valoreAttuale: 0, imu: 0, tari: 0, bollette: 0, speseBonifica: 0,
+  scadenzaImu: '', scadenzaTari: '', scadenzaBollette: '',
   allegati: [] as Allegato[], note: '', proprietarioId: '', pertinenzaDi: '',
 };
 
@@ -93,6 +94,7 @@ export default function ImmobiliPage() {
       valoreAcquisto: imm.valoreAcquisto || 0, valoreAttuale: imm.valoreAttuale || 0,
       imu: imm.imu || 0, tari: imm.tari || 0, bollette: imm.bollette || 0,
       speseBonifica: imm.speseBonifica || 0, allegati: imm.allegati || [], pertinenzaDi: imm.pertinenzaDi || '',
+      scadenzaImu: imm.scadenzaImu || '', scadenzaTari: imm.scadenzaTari || '', scadenzaBollette: imm.scadenzaBollette || '',
     });
     setEditing(imm.id); setOpen(true); setTab('info');
   };
@@ -252,8 +254,11 @@ export default function ImmobiliPage() {
                     )}
                     <div className="col-span-2 text-sm font-medium text-muted-foreground border-b pb-1 mt-2">Spese Fisse Annue</div>
                     <div><Label>IMU €/anno</Label><Input type="number" value={form.imu} onChange={e => setForm({...form, imu: +e.target.value})} /></div>
+                    <div><Label>Scadenza IMU (1ª rata)</Label><Input type="date" value={form.scadenzaImu} onChange={e => setForm({...form, scadenzaImu: e.target.value})} /></div>
                     <div><Label>TARI €/anno</Label><Input type="number" value={form.tari} onChange={e => setForm({...form, tari: +e.target.value})} /></div>
-                    <div><Label>Bollette €/mese (se vuoto)</Label><Input type="number" value={form.bollette} onChange={e => setForm({...form, bollette: +e.target.value})} /></div>
+                    <div><Label>Scadenza TARI (1ª rata)</Label><Input type="date" value={form.scadenzaTari} onChange={e => setForm({...form, scadenzaTari: e.target.value})} /></div>
+                    <div><Label>Bollette €/mese</Label><Input type="number" value={form.bollette} onChange={e => setForm({...form, bollette: +e.target.value})} /></div>
+                    <div><Label>Scadenza bollette (data mensile)</Label><Input type="date" value={form.scadenzaBollette} onChange={e => setForm({...form, scadenzaBollette: e.target.value})} /></div>
                     <div><Label>Spese Bonifica €</Label><Input type="number" value={form.speseBonifica} onChange={e => setForm({...form, speseBonifica: +e.target.value})} /></div>
                   </div>
                 </TabsContent>

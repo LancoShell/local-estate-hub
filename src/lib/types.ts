@@ -46,6 +46,9 @@ export interface Immobile {
   note: string;
   proprietarioId: string;
   pertinenzaDi: string; // id immobile principale (garage/cantina)
+  scadenzaImu: string; // prima scadenza IMU (le rate successive seguono la periodicità)
+  scadenzaTari: string;
+  scadenzaBollette: string;
   createdAt: string;
 }
 
@@ -107,7 +110,8 @@ export interface Contratto {
 
 export interface Pagamento {
   id: string;
-  contrattoId: string;
+  contrattoId: string; // vuoto se il pagamento riguarda solo l'immobile
+  immobileId?: string; // pagamento riferito direttamente all'immobile
   tipoPagamento: TipoPagamento;
   importo: number;
   importoDovuto: number;
@@ -148,6 +152,8 @@ export interface SpesaFissa {
   periodicita: PeriodicitaSpesa;
   dataInizio: string;
   attiva: boolean;
+  pagataFinoA?: string; // scadenza saldata più recente (la spesa torna disponibile alla successiva)
+  dataUltimoPagamento?: string;
   origine?: 'immobile'; // generata da IMU/TARI dell'immobile
   note: string;
   createdAt: string;

@@ -11,7 +11,7 @@ import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Plus, Trash2, Pencil, RefreshCw, TrendingUp, AlertTriangle } from 'lucide-react';
 import { toast } from 'sonner';
-import { calcolaMora, giorniRitardo, moraApplicabile, nomeProprietario, totaleDaIncassare } from '@/lib/finance';
+import { calcolaMora, giorniRitardo, moraApplicabile, nomeProprietario, totaleDaIncassare, prossimaScadenzaSpesa, MESI_PERIODICITA } from '@/lib/finance';
 
 const statiPag: StatoPagamento[] = ['pagato', 'parziale', 'insoluto', 'attesa'];
 const tipiPagamento: TipoPagamento[] = ['canone', 'deposito', 'fidejussione', 'registrazione', 'imu', 'tari', 'bolletta', 'condominio', 'manutenzione', 'altro'];
@@ -26,7 +26,7 @@ const statoBadge: Record<StatoPagamento, string> = {
 };
 
 const emptyPag = {
-  contrattoId: '', tipoPagamento: 'canone' as TipoPagamento, importo: 0, importoDovuto: 0,
+  contrattoId: '', immobileId: '', tipoPagamento: 'canone' as TipoPagamento, importo: 0, importoDovuto: 0,
   dataPagamento: '', dataScadenza: '', stato: 'attesa' as StatoPagamento, isDeposito: false,
   meseRiferimento: '', mora: 0, note: '',
 };
@@ -56,12 +56,14 @@ export default function ContabilitaPage() {
 
   // Quando si seleziona un contratto, pre-compila importo dovuto
   const handleContrattoChange = (v: string) => {
+    if (v === 'nessuno') { setFormPag(prev => ({ ...prev, contrattoId: '' })); return; }
     const c = data.contratti.find(x => x.id === v);
     const mese = new Date().toISOString().slice(0, 7);
     setFormPag(prev => ({
       ...prev,
       contrattoId: v,
-      importoDovuto: c?.canone ?? 0,
+      immobileId: '',
+      importoDovuto: prev.tipoPagamento === 'canone' ? c?.canone ?? 0 : prev.importoDovuto,
       meseRiferimento: mese,
       isDeposito: ['deposito', 'fidejussione'].includes(prev.tipoPagamento),
     }));
@@ -73,6 +75,7 @@ export default function ContabilitaPage() {
   };
 
   const handleSavePag = () => {
+    if (!form.contrattoId && !form.immobileId) { toast.error('Seleziona un contratto o un immobile'); return; }
     if (!form.dataScadenza) { toast.error('Data scadenza obbligatoria'); return; }
     const mora = formPag.stato === 'insoluto' && moraApplicabile(formPag) ? calcolaMora(formPag.importoDovuto, formPag.dataScadenza) : 0;
     addPagamento({ ...formPag, mora });
@@ -91,13 +94,17 @@ export default function ContabilitaPage() {
 
   const getContratto = (id: string) => data.contratti.find(c => c.id === id);
   const getImmobile = (id: string) => data.immobili.find(i => i.id === id);
+  const immobileDi = (p: Pagamento) => {
+    const c = getContratto(p.contrattoId);
+    return c ? getImmobile(c.immobileId) : p.immobileId ? getImmobile(p.immobileId) : null;
+  };
   const getInquilino = (id: string) => data.inquilini.find(i => i.id === id);
 
   // Pagamenti filtrati (solo canoni/non depositi)
   const pagamentiCanoni = data.pagamenti.filter(p => {
     if (p.isDeposito) return false;
     const c = getContratto(p.contrattoId);
-    const imm = c ? getImmobile(c.immobileId) : null;
+    const imm = immobileDi(p);
     const matchProp = filtroProprietario === 'tutti' || imm?.proprietarioId === filtroProprietario;
     const matchTip = filtroTipologia === 'tutti' || imm?.tipologia === filtroTipologia;
     const matchAnno = !filtroAnno || p.dataScadenza?.startsWith(filtroAnno) || p.dataPagamento?.startsWith(filtroAnno);
@@ -142,23 +149,6 @@ export default function ContabilitaPage() {
     return { inq, nome, totale, pagatiInTempo, pagatiTardi, insolutiN, score };
   }).filter(a => a.totale > 0);
 
-  // Tassazione per contratto attivo
-  const tassazione = data.contratti.filter(c => c.stato === 'attivo').map(c => {
-    const imm = getImmobile(c.immobileId);
-    const inq = getInquilino(c.inquilinoId);
-    const nomeInq = inq?.tipoSoggetto === 'azienda' ? inq.ragioneSociale : (inq ? `${inq.nome} ${inq.cognome}` : 'N/A');
-    const annuo = c.canone * 12;
-    let aliquota = 0.30;
-    let etichetta = 'IRPEF ~30%';
-    switch (c.tipoCedolare) {
-      case 'cedolare_secca': aliquota = 0.21; etichetta = 'Ced. Secca 21%'; break;
-      case 'cedolare_concordato': aliquota = 0.10; etichetta = 'Ced. Concordato 10%'; break;
-      case 'adeguamento_istat': aliquota = 0.21; etichetta = 'Adeg. ISTAT ~21%'; break;
-    }
-    const imposta = annuo * aliquota;
-    return { c, imm, nomeInq, annuo, imposta, netto: annuo - imposta, etichetta };
-  });
-
   const form = formPag; // alias per handleSavePag scope
 
   return (
@@ -170,13 +160,25 @@ export default function ContabilitaPage() {
           <DialogContent className="max-w-lg">
             <DialogHeader><DialogTitle className="font-display">Nuovo Pagamento</DialogTitle></DialogHeader>
             <div className="grid grid-cols-2 gap-3 mt-3">
-              <div className="col-span-2"><Label>Contratto</Label>
-                <Select value={formPag.contrattoId} onValueChange={handleContrattoChange}>
+              <div className="col-span-2"><Label>Immobile (per pagamenti non legati a un contratto)</Label>
+                <Select value={formPag.immobileId || 'nessuno'} onValueChange={v => setFormPag({...formPag, immobileId: v === 'nessuno' ? '' : v, contrattoId: v === 'nessuno' ? formPag.contrattoId : ''})}>
                   <SelectTrigger><SelectValue placeholder="Seleziona" /></SelectTrigger>
-                  <SelectContent>{data.contratti.map(c => {
+                  <SelectContent>
+                    <SelectItem value="nessuno">— Nessuno (uso il contratto) —</SelectItem>
+                    {data.immobili.map(i => <SelectItem key={i.id} value={i.id}>{i.codice} - {i.indirizzo}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="col-span-2"><Label>Contratto</Label>
+                <Select value={formPag.contrattoId || 'nessuno'} onValueChange={handleContrattoChange}>
+                  <SelectTrigger><SelectValue placeholder="Seleziona" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="nessuno">— Nessuno (solo immobile) —</SelectItem>
+                    {data.contratti.map(c => {
                     const imm = getImmobile(c.immobileId);
                     return <SelectItem key={c.id} value={c.id}>{imm?.codice} - €{c.canone}/mese</SelectItem>;
-                  })}</SelectContent>
+                  })}
+                  </SelectContent>
                 </Select>
               </div>
               <div><Label>Tipo</Label>
@@ -244,7 +246,6 @@ export default function ContabilitaPage() {
           <TabsTrigger value="depositi">Depositi</TabsTrigger>
           <TabsTrigger value="insoluti">Insoluti ({insoluti.length})</TabsTrigger>
           <TabsTrigger value="affidabilita">Affidabilità</TabsTrigger>
-          <TabsTrigger value="tassazione">Tassazione</TabsTrigger>
           <TabsTrigger value="spese">Spese Fisse</TabsTrigger>
         </TabsList>
 
@@ -299,7 +300,7 @@ export default function ContabilitaPage() {
             <div className="space-y-2">
               {pagamentiCanoni.sort((a, b) => b.dataScadenza.localeCompare(a.dataScadenza)).map(p => {
                 const c = getContratto(p.contrattoId);
-                const imm = c ? getImmobile(c.immobileId) : null;
+                const imm = immobileDi(p);
                 const inq = c ? getInquilino(c.inquilinoId) : null;
                 const nomeInq = inq?.tipoSoggetto === 'azienda' ? inq.ragioneSociale : (inq ? `${inq.nome} ${inq.cognome}` : '');
                 return (
@@ -339,7 +340,7 @@ export default function ContabilitaPage() {
           ) : (
             pagamentiDepositi.map(p => {
               const c = getContratto(p.contrattoId);
-              const imm = c ? getImmobile(c.immobileId) : null;
+              const imm = immobileDi(p);
               const inq = c ? getInquilino(c.inquilinoId) : null;
               const nome = inq?.tipoSoggetto === 'azienda' ? inq.ragioneSociale : (inq ? `${inq.nome} ${inq.cognome}` : '');
               return (
@@ -366,7 +367,7 @@ export default function ContabilitaPage() {
           ) : (
             insoluti.sort((a, b) => a.dataScadenza.localeCompare(b.dataScadenza)).map(p => {
               const c = getContratto(p.contrattoId);
-              const imm = c ? getImmobile(c.immobileId) : null;
+              const imm = immobileDi(p);
               const inq = c ? getInquilino(c.inquilinoId) : null;
               const nome = inq?.tipoSoggetto === 'azienda' ? inq.ragioneSociale : (inq ? `${inq.nome} ${inq.cognome}` : '');
               const giorni = giorniRitardo(p.dataScadenza);
@@ -431,40 +432,6 @@ export default function ContabilitaPage() {
           )}
         </TabsContent>
 
-        {/* TAB TASSAZIONE */}
-        <TabsContent value="tassazione" className="mt-4 space-y-3">
-          <p className="text-xs text-muted-foreground">Stime indicative. Consultare un commercialista per calcoli definitivi.</p>
-          {tassazione.length === 0 ? (
-            <Card className="glass-card"><CardContent className="p-8 text-center text-muted-foreground">Nessun contratto attivo</CardContent></Card>
-          ) : (
-            <>
-              <div className="grid gap-3">
-                {tassazione.map(({ c, imm, nomeInq, annuo, imposta, netto, etichetta }) => (
-                  <Card key={c.id} className="glass-card">
-                    <CardContent className="p-4 grid grid-cols-2 md:grid-cols-5 gap-3 text-sm items-center">
-                      <div><p className="font-semibold">{imm?.codice || '—'}</p><p className="text-xs text-muted-foreground">{imm?.indirizzo}</p></div>
-                      <p className="text-muted-foreground">{nomeInq}</p>
-                      <p>Annuo: <strong>€{annuo.toLocaleString('it-IT')}</strong></p>
-                      <p className="text-destructive">Imposta: <strong>€{imposta.toLocaleString('it-IT', { maximumFractionDigits: 0 })}</strong><br/><span className="text-xs text-muted-foreground">{etichetta}</span></p>
-                      <p className="text-success">Netto: <strong>€{netto.toLocaleString('it-IT', { maximumFractionDigits: 0 })}</strong></p>
-                    </CardContent>
-                  </Card>
-                ))}
-              </div>
-              <Card className="glass-card">
-                <CardContent className="p-4">
-                  <p className="text-sm font-medium">Totale anno</p>
-                  <div className="grid grid-cols-3 gap-4 mt-2 text-center">
-                    <div><p className="text-xs text-muted-foreground">Entrate lorde</p><p className="font-bold">€{tassazione.reduce((s, t) => s + t.annuo, 0).toLocaleString('it-IT')}</p></div>
-                    <div><p className="text-xs text-destructive">Imposte stimate</p><p className="font-bold text-destructive">€{tassazione.reduce((s, t) => s + t.imposta, 0).toLocaleString('it-IT', { maximumFractionDigits: 0 })}</p></div>
-                    <div><p className="text-xs text-success">Netto stimato</p><p className="font-bold text-success">€{tassazione.reduce((s, t) => s + t.netto, 0).toLocaleString('it-IT', { maximumFractionDigits: 0 })}</p></div>
-                  </div>
-                </CardContent>
-              </Card>
-            </>
-          )}
-        </TabsContent>
-
         {/* TAB SPESE FISSE */}
         <TabsContent value="spese" className="mt-4 space-y-4">
           <div className="flex items-center justify-between">
@@ -526,9 +493,20 @@ export default function ContabilitaPage() {
                         <Badge variant="outline" className="w-fit capitalize">{s.tipo}</Badge>
                         <p>{s.descrizione || '—'}</p>
                         <p>€{s.importo.toLocaleString('it-IT')} / <span className="text-muted-foreground capitalize">{s.periodicita}</span></p>
-                        <p className="text-muted-foreground text-xs">€{annuo.toLocaleString('it-IT')} annui</p>
+                        <div className="text-xs text-muted-foreground">
+                          <p>€{annuo.toLocaleString('it-IT')} annui</p>
+                          <p>Prossima scadenza: <strong>{prossimaScadenzaSpesa(s)}</strong></p>
+                          {s.dataUltimoPagamento && <p>Ultimo pagamento: {s.dataUltimoPagamento}</p>}
+                        </div>
                       </div>
                       <div className="flex gap-1">
+                        {s.attiva && (
+                          <Button size="sm" variant="outline" onClick={() => {
+                            const scad = prossimaScadenzaSpesa(s);
+                            updateSpesaFissa(s.id, { pagataFinoA: scad, dataUltimoPagamento: new Date().toISOString().slice(0, 10) });
+                            toast.success(`Pagata la scadenza del ${scad}: prossima tra ${MESI_PERIODICITA[s.periodicita]} mesi`);
+                          }}>✓ Paga</Button>
+                        )}
                         <Button variant="ghost" size="icon" onClick={() => {
                           setFormSpesa({ immobileId: s.immobileId, tipo: s.tipo, descrizione: s.descrizione, importo: s.importo, periodicita: s.periodicita, dataInizio: s.dataInizio, attiva: s.attiva, note: s.note });
                           setEditingSpesa(s.id); setOpenSpesa(true);

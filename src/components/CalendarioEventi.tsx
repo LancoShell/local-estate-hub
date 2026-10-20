@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useData } from '@/contexts/DataContext';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { prossimaScadenzaSpesa, MESI_PERIODICITA } from '@/lib/finance';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 
 interface CalEvent {
@@ -58,17 +59,18 @@ export default function CalendarioEventi() {
     events.push({ data: c.dataFine, tipo: 'contratto_scade', label: `Fine contratto: ${data.immobili.find(i => i.id === c.immobileId)?.codice || ''}` });
   });
 
-  // Scadenze IMU, TARI e altre spese fisse per il mese visualizzato
-  const periodicityMonths: Record<string, number> = { mensile: 1, trimestrale: 3, semestrale: 6, annuale: 12 };
+  // Scadenze delle spese fisse (IMU, TARI, bollette...) nel mese visualizzato: solo quelle non ancora pagate
   data.speseFisse.filter(s => s.attiva).forEach(s => {
+    const prossima = prossimaScadenzaSpesa(s);
     const inizio = new Date(s.dataInizio || s.createdAt);
     const diffMesi = (anno - inizio.getFullYear()) * 12 + (mese - inizio.getMonth());
     if (diffMesi < 0) return;
-    const mult = periodicityMonths[s.periodicita] ?? 1;
+    const mult = MESI_PERIODICITA[s.periodicita] ?? 1;
     if (diffMesi % mult !== 0) return;
     const imm = data.immobili.find(i => i.id === s.immobileId);
     const dueDay = Math.min(inizio.getDate(), new Date(anno, mese + 1, 0).getDate());
     const dataStr = `${anno}-${String(mese + 1).padStart(2, '0')}-${String(dueDay).padStart(2, '0')}`;
+    if (dataStr < prossima) return; // già pagata
     events.push({
       data: dataStr,
       tipo: 'spesa_fissa',

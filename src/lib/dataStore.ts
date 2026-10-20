@@ -24,7 +24,7 @@ export function loadData(): AppData {
       ...stored,
       speseFisse: stored.speseFisse ?? [],
       immobili: (stored.immobili ?? []).map(i => ({
-        valoreAcquisto: 0, valoreAttuale: 0, imu: 0, tari: 0, bollette: 0, speseBonifica: 0, allegati: [], pertinenzaDi: '',
+        valoreAcquisto: 0, valoreAttuale: 0, imu: 0, tari: 0, bollette: 0, speseBonifica: 0, allegati: [], pertinenzaDi: '', scadenzaImu: '', scadenzaTari: '', scadenzaBollette: '',
         ...i,
       })),
       proprietari: (stored.proprietari ?? []).map(p => ({

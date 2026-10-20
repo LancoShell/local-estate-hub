@@ -65,36 +65,42 @@ function gruppoImmobile(immobili: Immobile[], immobileId: string): Set<string> {
 
 const annoCorrente = () => new Date().getFullYear();
 
-// Allinea le spese fisse IMU/TARI all'immobile (2 rate semestrali, date modificabili in Contabilità)
+// Allinea le spese fisse IMU/TARI/bollette all'immobile. Le date di scadenza si impostano
+// sull'immobile (altrimenti default IMU 16/06, TARI 30/06); IMU/TARI in 2 rate semestrali.
 function syncSpeseImmobile(d: AppData, immobileId: string, soloMancanti = false): AppData {
   const imm = d.immobili.find(i => i.id === immobileId);
   if (!imm) return d;
   let spese = d.speseFisse;
   const config = [
-    { tipo: 'imu' as const, annuo: imm.imu || 0, inizio: `${annoCorrente()}-06-16`, label: 'IMU' },
-    { tipo: 'tari' as const, annuo: imm.tari || 0, inizio: `${annoCorrente()}-06-30`, label: 'TARI' },
+    { tipo: 'imu' as const, importo: Math.round(((imm.imu || 0) / 2) * 100) / 100, attiva: (imm.imu || 0) > 0, per: 'semestrale' as const,
+      inizio: imm.scadenzaImu || `${annoCorrente()}-06-16`, descr: `IMU annua €${imm.imu || 0} (2 rate)` },
+    { tipo: 'tari' as const, importo: Math.round(((imm.tari || 0) / 2) * 100) / 100, attiva: (imm.tari || 0) > 0, per: 'semestrale' as const,
+      inizio: imm.scadenzaTari || `${annoCorrente()}-06-30`, descr: `TARI annua €${imm.tari || 0} (2 rate)` },
+    { tipo: 'bolletta' as const, importo: imm.bollette || 0, attiva: (imm.bollette || 0) > 0 && !!imm.scadenzaBollette, per: 'mensile' as const,
+      inizio: imm.scadenzaBollette, descr: 'Bollette' },
   ];
-  for (const { tipo, annuo, inizio, label } of config) {
+  for (const { tipo, importo, attiva, per, inizio, descr } of config) {
     const collegata = spese.find(s => s.immobileId === immobileId && s.tipo === tipo && s.origine === 'immobile');
     if (soloMancanti) {
-      if (annuo > 0 && !spese.some(s => s.immobileId === immobileId && s.tipo === tipo)) {
+      if (attiva && !spese.some(s => s.immobileId === immobileId && s.tipo === tipo)) {
         spese = [...spese, {
-          id: generateId(), immobileId, tipo, descrizione: `${label} annua €${annuo} (2 rate)`, importo: annuo / 2,
-          periodicita: 'semestrale', dataInizio: inizio, attiva: true, origine: 'immobile', note: '', createdAt: new Date().toISOString(),
+          id: generateId(), immobileId, tipo, descrizione: descr, importo,
+          periodicita: per, dataInizio: inizio, attiva: true, origine: 'immobile', note: '', createdAt: new Date().toISOString(),
         }];
       }
       continue;
     }
-    if (annuo > 0) {
-      const rata = Math.round((annuo / 2) * 100) / 100;
+    if (attiva) {
       if (collegata) {
+        // la data impostata sull'immobile vince solo se è stata specificata
+        const dataInizio = (tipo === 'imu' ? imm.scadenzaImu : tipo === 'tari' ? imm.scadenzaTari : imm.scadenzaBollette) || collegata.dataInizio;
         spese = spese.map(s => s.id === collegata.id
-          ? { ...s, importo: rata, periodicita: 'semestrale', attiva: true, descrizione: `${label} annua €${annuo} (2 rate)` }
+          ? { ...s, importo, periodicita: per, attiva: true, descrizione: descr, dataInizio }
           : s);
       } else {
         spese = [...spese, {
-          id: generateId(), immobileId, tipo, descrizione: `${label} annua €${annuo} (2 rate)`, importo: rata,
-          periodicita: 'semestrale', dataInizio: inizio, attiva: true, origine: 'immobile', note: '', createdAt: new Date().toISOString(),
+          id: generateId(), immobileId, tipo, descrizione: descr, importo,
+          periodicita: per, dataInizio: inizio, attiva: true, origine: 'immobile', note: '', createdAt: new Date().toISOString(),
         }];
       }
     } else if (collegata) {

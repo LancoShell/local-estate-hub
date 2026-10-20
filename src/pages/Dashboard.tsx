@@ -43,8 +43,6 @@ export default function Dashboard() {
   const costiManutenzione = data.manutenzioni
     .filter(m => m.stato === 'completata')
     .reduce((s, m) => s + m.costo, 0);
-  const speseImu = data.immobili.reduce((s, i) => s + (i.imu || 0), 0);
-  const speseTari = data.immobili.reduce((s, i) => s + (i.tari || 0), 0);
   const speseFisseAnnue = data.speseFisse
     .filter(s => s.attiva)
     .reduce((s, sf) => {
@@ -52,7 +50,7 @@ export default function Dashboard() {
       return s + sf.importo * mult;
     }, 0);
 
-  const totaleUscite = costiManutenzione + speseImu + speseTari + speseFisseAnnue;
+  const totaleUscite = costiManutenzione + speseFisseAnnue // IMU/TARI sono già nelle spese fisse collegate all'immobile;
   const cashFlow = totaleEntrate - totaleUscite;
 
   // Depositi tenuti
